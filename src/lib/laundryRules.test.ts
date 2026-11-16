@@ -6,13 +6,19 @@ import {
   DEFAULT_SITE_SETTINGS,
   formatRupiah,
   generateOrderCode,
+  getAdminDecisionLabel,
+  getPaymentStatusLabel,
   getVisibleStagesForService,
   maskCustomerName,
   matchFaqFallbackAnswer,
   normalizeWhatsappNumber,
   parseWeightInput,
+  sumOrderItemsWeight,
+  validateManualOrderInput,
   validateOrderInput,
 } from './laundryRules';
+import { buildOrdersAndRevenueSeries } from './adminAnalytics';
+import type { OrderRecordClient } from '../types';
 
 test('price calculation supports integers and decimals with minimum 1 kg', () => {
   assert.equal(calculateEstimatedPrice(3, 7000), 21000);
@@ -63,6 +69,45 @@ test('order input validation catches missing fields and invalid weight', () => {
     notes: 'Pisahkan baju putih',
   });
   assert.equal(valid.valid, true);
+});
+
+test('manual order validation and clothing item weight summing work accurately', () => {
+  const weightSum = sumOrderItemsWeight([
+    { weightKg: 1.2 },
+    { weightKg: 0.8 },
+  ]);
+  assert.equal(weightSum, 2);
+
+  const invalidManual = validateManualOrderInput({
+    customerName: 'A',
+    customerPhone: '08',
+    pickupAddress: '',
+    serviceId: '',
+    orderSource: 'manual',
+    paymentStatus: 'belum_dibayar',
+    totalWeightKg: 0.5,
+    items: [],
+  });
+  assert.equal(invalidManual.valid, false);
+  assert.ok(invalidManual.errors.items);
+  assert.ok(invalidManual.errors.totalWeightKg);
+
+  const validManual = validateManualOrderInput({
+    customerName: 'Andi Wijaya',
+    customerPhone: '081298765432',
+    pickupAddress: 'Datang langsung ke workshop',
+    serviceId: 'cuci-setrika',
+    orderSource: 'manual',
+    paymentStatus: 'lunas',
+    totalWeightKg: 2,
+    items: [
+      { category: 'Kaos', quantity: 4, weightKg: 1.2, conditionNote: 'Normal' },
+      { category: 'Jaket', quantity: 1, weightKg: 0.8, conditionNote: 'Bernoda', specialNote: 'Noda kopi di lengan' },
+    ],
+  });
+  assert.equal(validManual.valid, true);
+  assert.equal(getPaymentStatusLabel('lunas'), 'Lunas');
+  assert.equal(getAdminDecisionLabel('diterima'), 'Diterima');
 });
 
 test('visible stages skip ironing step for Cuci Kering', () => {
@@ -118,4 +163,90 @@ test('FAQ fallback answers pricing and location accurately', () => {
   assert.ok(priceReply.includes('Rp10.000/kg'));
   const locReply = matchFaqFallbackAnswer('Dimana lokasi huzavin?', services, DEFAULT_SITE_SETTINGS);
   assert.ok(locReply.includes('Sawangan'));
+});
+
+function makeMockOrder(overrides: Partial<OrderRecordClient>): OrderRecordClient {
+  return {
+    id: 'ord-1',
+    orderCode: 'HZV-202611-0001',
+    customerId: null,
+    customerName: 'Test User',
+    customerPhone: '081234567890',
+    pickupAddress: 'Sawangan, Depok',
+    pickupLandmark: '',
+    serviceId: 'cuci-setrika',
+    serviceName: 'Cuci Setrika',
+    includesIroning: true,
+    pricePerKg: 10000,
+    estimatedWeight: 2,
+    finalWeight: null,
+    estimatedPrice: 20000,
+    finalPrice: null,
+    pickupDate: '2026-11-16',
+    pickupTime: '09:00',
+    notes: '',
+    status: 'MENUNGGU_PENJEMPUTAN',
+    adminDecision: 'menunggu',
+    rejectionReason: '',
+    orderSource: 'website',
+    paymentStatus: 'belum_dibayar',
+    createdAt: '2026-11-16T08:00:00.000Z',
+    updatedAt: '2026-11-16T08:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('admin analytics series aggregates harian, mingguan, bulanan and excludes rejected orders', () => {
+  const ref = new Date('2026-11-16T12:00:00.000Z');
+  const orders: OrderRecordClient[] = [
+    makeMockOrder({
+      id: '1',
+      createdAt: '2026-11-16T07:00:00.000Z',
+      estimatedPrice: 20000,
+      finalPrice: 25000,
+      adminDecision: 'diterima',
+    }),
+    makeMockOrder({
+      id: '2',
+      createdAt: '2026-11-15T09:00:00.000Z',
+      estimatedPrice: 14000,
+      adminDecision: 'menunggu',
+    }),
+    makeMockOrder({
+      id: '3',
+      createdAt: '2026-11-16T10:00:00.000Z',
+      estimatedPrice: 99000,
+      adminDecision: 'ditolak',
+    }),
+    makeMockOrder({
+      id: '4',
+      createdAt: '2026-10-05T10:00:00.000Z',
+      estimatedPrice: 30000,
+      adminDecision: 'diterima',
+    }),
+  ];
+
+  const daily = buildOrdersAndRevenueSeries(orders, 'harian', ref);
+  assert.equal(daily.length, 7);
+  const todayBucket = daily.find((b) => b.key === '2026-11-16');
+  const yestBucket = daily.find((b) => b.key === '2026-11-15');
+  assert.equal(todayBucket?.ordersCount, 1);
+  assert.equal(todayBucket?.revenue, 25000);
+  assert.equal(yestBucket?.ordersCount, 1);
+  assert.equal(yestBucket?.revenue, 14000);
+
+  const weekly = buildOrdersAndRevenueSeries(orders, 'mingguan', ref);
+  assert.equal(weekly.length, 4);
+  assert.equal(weekly[3].label, 'Minggu Ini');
+  assert.equal(weekly[3].ordersCount, 2);
+  assert.equal(weekly[3].revenue, 39000);
+
+  const monthly = buildOrdersAndRevenueSeries(orders, 'bulanan', ref);
+  assert.equal(monthly.length, 6);
+  const novBucket = monthly.find((b) => b.key === '2026-11');
+  const octBucket = monthly.find((b) => b.key === '2026-10');
+  assert.equal(novBucket?.ordersCount, 2);
+  assert.equal(novBucket?.revenue, 39000);
+  assert.equal(octBucket?.ordersCount, 1);
+  assert.equal(octBucket?.revenue, 30000);
 });

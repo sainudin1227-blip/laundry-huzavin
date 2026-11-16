@@ -3,6 +3,7 @@ import "dotenv/config";
 import express from "express";
 import cookieParser from "cookie-parser";
 import crypto4 from "crypto";
+import fs3 from "fs";
 import path3 from "path";
 import { fileURLToPath } from "url";
 
@@ -85,6 +86,34 @@ var DEFAULT_SITE_SETTINGS = {
   whatsappRaw: "6289515559477",
   whatsappDisplay: "089515559477"
 };
+function validateManualOrderInput(input) {
+  const errors = {};
+  if (!input.customerName || input.customerName.trim().length < 2) {
+    errors.customerName = "Nama pelanggan wajib diisi.";
+  }
+  const normalizedPhone = normalizeWhatsappNumber(input.customerPhone || "");
+  if (!normalizedPhone || normalizedPhone.length < 10 || normalizedPhone.length > 15) {
+    errors.customerPhone = "Nomor WhatsApp tidak valid.";
+  }
+  if (!input.serviceId) {
+    errors.serviceId = "Jenis layanan wajib dipilih.";
+  }
+  if (!Array.isArray(input.items) || input.items.length === 0) {
+    errors.items = "Minimal 1 jenis pakaian wajib ditambahkan.";
+  } else {
+    const invalidItem = input.items.some((item) => !item.category.trim() || item.quantity < 1);
+    if (invalidItem) {
+      errors.items = "Setiap item pakaian wajib memiliki kategori dan jumlah minimal 1.";
+    }
+  }
+  if (!Number.isFinite(input.totalWeightKg) || input.totalWeightKg < 1) {
+    errors.totalWeightKg = "Total berat cucian minimal 1 kg.";
+  }
+  return {
+    valid: Object.keys(errors).length === 0,
+    errors
+  };
+}
 function parseWeightInput(raw) {
   if (typeof raw === "number") {
     return Number.isFinite(raw) ? Math.round(raw * 100) / 100 : 0;
@@ -231,10 +260,30 @@ var dataDir = path.resolve(process.cwd(), "data");
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
+var clothingUploadsDir = path.join(dataDir, "uploads", "clothing");
+if (!fs.existsSync(clothingUploadsDir)) {
+  fs.mkdirSync(clothingUploadsDir, { recursive: true });
+}
 var dbPath = path.join(dataDir, "huzavin.db");
 var db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
+function ensureOrdersColumns() {
+  const cols = db.prepare("PRAGMA table_info(orders)").all();
+  const colNames = new Set(cols.map((c) => c.name));
+  if (!colNames.has("order_source")) {
+    db.exec("ALTER TABLE orders ADD COLUMN order_source TEXT NOT NULL DEFAULT 'website'");
+  }
+  if (!colNames.has("payment_status")) {
+    db.exec("ALTER TABLE orders ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'belum_dibayar'");
+  }
+  if (!colNames.has("admin_decision")) {
+    db.exec("ALTER TABLE orders ADD COLUMN admin_decision TEXT NOT NULL DEFAULT 'menunggu'");
+  }
+  if (!colNames.has("rejection_reason")) {
+    db.exec("ALTER TABLE orders ADD COLUMN rejection_reason TEXT NOT NULL DEFAULT ''");
+  }
+}
 function initDatabase() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS services (
@@ -280,8 +329,34 @@ function initDatabase() {
       pickup_time TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'ORDER_DITERIMA',
+      order_source TEXT NOT NULL DEFAULT 'website',
+      payment_status TEXT NOT NULL DEFAULT 'belum_dibayar',
+      admin_decision TEXT NOT NULL DEFAULT 'menunggu',
+      rejection_reason TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS order_items (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      category TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 1,
+      weight_kg REAL NOT NULL DEFAULT 0,
+      condition_note TEXT NOT NULL DEFAULT 'Normal',
+      special_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS clothing_photos (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      photo_stage TEXT NOT NULL DEFAULT 'sebelum',
+      file_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+      caption TEXT NOT NULL DEFAULT '',
+      uploaded_by TEXT NOT NULL DEFAULT 'Admin Huzavin',
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS order_status_history (
@@ -339,6 +414,7 @@ function initDatabase() {
       created_at TEXT NOT NULL
     );
   `);
+  ensureOrdersColumns();
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const serviceCount = db.prepare("SELECT COUNT(*) as count FROM services").get();
   if (serviceCount.count === 0) {
@@ -512,8 +588,14 @@ function mapOrderRow(row) {
     pickupTime: String(row.pickup_time),
     notes: String(row.notes ?? ""),
     status: String(row.status),
+    orderSource: row.order_source ? String(row.order_source) : "website",
+    paymentStatus: row.payment_status ? String(row.payment_status) : "belum_dibayar",
+    adminDecision: row.admin_decision ? String(row.admin_decision) : "menunggu",
+    rejectionReason: String(row.rejection_reason ?? ""),
     createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at)
+    updatedAt: String(row.updated_at),
+    itemsCount: row.items_count !== void 0 ? Number(row.items_count) : void 0,
+    photosCount: row.photos_count !== void 0 ? Number(row.photos_count) : void 0
   };
 }
 function getOrderHistory(orderId) {
@@ -529,6 +611,112 @@ function getOrderHistory(orderId) {
     updatedBy: r.updated_by,
     createdAt: r.created_at
   }));
+}
+function getOrderItems(orderId) {
+  const rows = db.prepare(
+    `SELECT id, order_id, category, quantity, weight_kg, condition_note, special_note, created_at
+       FROM order_items WHERE order_id = ? ORDER BY created_at ASC`
+  ).all(orderId);
+  return rows.map((r) => ({
+    id: r.id,
+    orderId: r.order_id,
+    category: r.category,
+    quantity: r.quantity,
+    weightKg: r.weight_kg,
+    conditionNote: r.condition_note,
+    specialNote: r.special_note,
+    createdAt: r.created_at
+  }));
+}
+function getClothingPhotos(orderId) {
+  const rows = db.prepare(
+    `SELECT id, order_id, photo_stage, file_name, mime_type, caption, uploaded_by, created_at
+       FROM clothing_photos WHERE order_id = ? ORDER BY created_at DESC`
+  ).all(orderId);
+  return rows.map((r) => ({
+    id: r.id,
+    orderId: r.order_id,
+    photoStage: r.photo_stage,
+    fileName: r.file_name,
+    mimeType: r.mime_type,
+    imageUrl: `/api/admin/clothing-photos/${r.id}/file`,
+    caption: r.caption,
+    uploadedBy: r.uploaded_by,
+    createdAt: r.created_at
+  }));
+}
+function getAllClothingItemsWithOrders() {
+  const rows = db.prepare(
+    `SELECT
+         oi.id, oi.order_id, oi.category, oi.quantity, oi.weight_kg, oi.condition_note, oi.special_note, oi.created_at,
+         o.order_code, o.customer_name, o.status AS order_status, o.service_name, o.created_at AS order_created_at,
+         (SELECT COUNT(*) FROM clothing_photos cp WHERE cp.order_id = o.id) AS photo_count,
+         (SELECT cp.id FROM clothing_photos cp WHERE cp.order_id = o.id ORDER BY cp.created_at DESC LIMIT 1) AS first_photo_id
+       FROM order_items oi
+       INNER JOIN orders o ON o.id = oi.order_id
+       ORDER BY oi.created_at DESC`
+  ).all();
+  return rows.map((r) => ({
+    id: r.id,
+    orderId: r.order_id,
+    category: r.category,
+    quantity: r.quantity,
+    weightKg: r.weight_kg,
+    conditionNote: r.condition_note,
+    specialNote: r.special_note,
+    createdAt: r.created_at,
+    orderCode: r.order_code,
+    customerName: r.customer_name,
+    orderStatus: r.order_status,
+    serviceName: r.service_name,
+    orderCreatedAt: r.order_created_at,
+    photoCount: r.photo_count,
+    firstPhotoUrl: r.first_photo_id ? `/api/admin/clothing-photos/${r.first_photo_id}/file` : null
+  }));
+}
+function getCustomersDirectory() {
+  const rows = db.prepare(
+    `SELECT
+         c.id, c.name, c.whatsapp, c.last_address, c.last_landmark, c.created_at,
+         COUNT(o.id) AS orders_count,
+         COALESCE(SUM(COALESCE(o.final_price, o.estimated_price)), 0) AS total_spent,
+         MAX(o.created_at) AS last_order_at
+       FROM customers c
+       LEFT JOIN orders o ON o.customer_id = c.id
+       GROUP BY c.id
+       ORDER BY COALESCE(MAX(o.created_at), c.created_at) DESC`
+  ).all();
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    whatsapp: r.whatsapp,
+    lastAddress: r.last_address,
+    lastLandmark: r.last_landmark,
+    ordersCount: r.orders_count,
+    totalSpent: r.total_spent,
+    lastOrderAt: r.last_order_at,
+    createdAt: r.created_at
+  }));
+}
+function saveClothingPhotoFile(dataUrl) {
+  const match = dataUrl.match(/^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,(.+)$/i);
+  if (!match) return null;
+  const mimeType = match[1].toLowerCase() === "image/jpg" ? "image/jpeg" : match[1].toLowerCase();
+  const ext = mimeType.split("/")[1] === "jpeg" ? "jpg" : mimeType.split("/")[1];
+  const fileName = `${crypto.randomUUID()}.${ext}`;
+  const buffer = Buffer.from(match[2], "base64");
+  if (buffer.length > 8 * 1024 * 1024) {
+    throw new Error("Ukuran foto maksimal 8 MB.");
+  }
+  fs.writeFileSync(path.join(clothingUploadsDir, fileName), buffer);
+  return { fileName, mimeType };
+}
+function deleteClothingPhotoFile(fileName) {
+  const safeName = path.basename(fileName);
+  const fullPath = path.join(clothingUploadsDir, safeName);
+  if (fs.existsSync(fullPath)) {
+    fs.unlinkSync(fullPath);
+  }
 }
 function createNextOrderCode(now) {
   const yearMonth = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -610,26 +798,61 @@ function authenticateAdminCredentials(username, password) {
     mustChangePassword: Boolean(row.must_change_password)
   };
 }
-function setAdminSessionCookie(res, admin) {
-  const token = signToken({
+function isHttpsRequest(req) {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim().toLowerCase();
+  const origin = String(req.headers.origin ?? "").toLowerCase();
+  const referer = String(req.headers.referer ?? "").toLowerCase();
+  return req.secure || forwardedProto === "https" || req.protocol === "https" || origin.startsWith("https://") || referer.startsWith("https://");
+}
+function createAdminSessionToken(admin) {
+  return signToken({
     adminId: admin.id,
     username: admin.username,
     exp: Date.now() + SESSION_TTL_MS
   });
+}
+function setAdminSessionCookie(req, res, admin) {
+  const token = createAdminSessionToken(admin);
+  const https = isHttpsRequest(req);
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production" && process.env.APP_URL?.startsWith("https://"),
+    sameSite: https ? "none" : "lax",
+    secure: https,
     maxAge: SESSION_TTL_MS,
     path: "/"
   });
+  return token;
 }
-function clearAdminSessionCookie(res) {
-  res.clearCookie(COOKIE_NAME, { path: "/" });
+function clearAdminSessionCookie(req, res) {
+  const https = isHttpsRequest(req);
+  res.clearCookie(COOKIE_NAME, {
+    httpOnly: true,
+    sameSite: https ? "none" : "lax",
+    secure: https,
+    path: "/"
+  });
+}
+function extractTokenFromRequest(req) {
+  const cookieToken = req.cookies?.[COOKIE_NAME];
+  if (typeof cookieToken === "string" && cookieToken.trim()) {
+    return cookieToken.trim();
+  }
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === "string" && authHeader.toLowerCase().startsWith("bearer ")) {
+    const bearer = authHeader.slice(7).trim();
+    if (bearer) return bearer;
+  }
+  if (req.method === "GET" && (req.path === "/api/admin/stream" || req.path.startsWith("/api/admin/clothing-photos/"))) {
+    const qToken = req.query?.token;
+    if (typeof qToken === "string" && qToken.trim()) {
+      return qToken.trim();
+    }
+  }
+  return null;
 }
 function readAdminFromRequest(req) {
-  const token = req.cookies?.[COOKIE_NAME];
-  if (!token || typeof token !== "string") return null;
+  const token = extractTokenFromRequest(req);
+  if (!token) return null;
   const payload = verifyToken(token);
   if (!payload) return null;
   const row = db.prepare(
@@ -752,30 +975,46 @@ Pertanyaan terbaru pelanggan: ${cleanMessage}` : cleanMessage;
 // server.ts
 initDatabase();
 var app = express();
+app.set("trust proxy", 1);
 var PORT = Number(process.env.PORT) || 3e3;
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "15mb" }));
 app.use(cookieParser());
 var trackingStreams = /* @__PURE__ */ new Map();
+var adminStreams = /* @__PURE__ */ new Set();
 function broadcastOrderUpdate(orderCode) {
   const key = orderCode.trim().toUpperCase();
   const listeners = trackingStreams.get(key);
-  if (!listeners || listeners.size === 0) return;
-  const row = db.prepare("SELECT * FROM orders WHERE UPPER(order_code) = ?").get(key);
-  if (!row) return;
-  const order = mapOrderRow(row);
-  const history = getOrderHistory(order.id);
-  const payload = JSON.stringify({
-    orderCode: order.orderCode,
-    status: order.status,
-    statusLabel: getStageLabel(order.status),
-    finalWeight: order.finalWeight,
-    finalPrice: order.finalPrice,
-    updatedAt: order.updatedAt,
-    history
-  });
-  for (const res of listeners) {
-    res.write(`event: status-update
+  if (listeners && listeners.size > 0) {
+    const row = db.prepare("SELECT * FROM orders WHERE UPPER(order_code) = ?").get(key);
+    if (row) {
+      const order = mapOrderRow(row);
+      const history = getOrderHistory(order.id);
+      const payload = JSON.stringify({
+        orderCode: order.orderCode,
+        status: order.status,
+        statusLabel: getStageLabel(order.status),
+        finalWeight: order.finalWeight,
+        finalPrice: order.finalPrice,
+        paymentStatus: order.paymentStatus,
+        adminDecision: order.adminDecision,
+        updatedAt: order.updatedAt,
+        history
+      });
+      for (const res of listeners) {
+        res.write(`event: status-update
 data: ${payload}
+
+`);
+      }
+    }
+  }
+}
+function broadcastAdminEvent(eventName, data) {
+  if (adminStreams.size === 0) return;
+  const serialized = JSON.stringify(data);
+  for (const res of adminStreams) {
+    res.write(`event: ${eventName}
+data: ${serialized}
 
 `);
   }
@@ -840,7 +1079,7 @@ app.post("/api/orders", (req, res) => {
   const cleanNotes = String(body.notes ?? "").trim();
   const estimatedPrice = calculateEstimatedPrice(estimatedWeight, serviceRow.price_per_kg);
   const tx = db.transaction(() => {
-    let customerRow = db.prepare("SELECT id FROM customers WHERE whatsapp = ?").get(normalizedPhone);
+    const customerRow = db.prepare("SELECT id FROM customers WHERE whatsapp = ?").get(normalizedPhone);
     let customerId = customerRow?.id;
     if (customerId) {
       db.prepare("UPDATE customers SET name = ?, last_address = ?, last_landmark = ?, updated_at = ? WHERE id = ?").run(
@@ -865,8 +1104,9 @@ app.post("/api/orders", (req, res) => {
         id, order_code, customer_id, customer_name, customer_phone,
         pickup_address, pickup_landmark, service_id, service_name, includes_ironing,
         price_per_kg, estimated_weight, final_weight, estimated_price, final_price,
-        pickup_date, pickup_time, notes, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?)`
+        pickup_date, pickup_time, notes, status, order_source, payment_status, admin_decision,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, 'website', 'belum_dibayar', 'menunggu', ?, ?)`
     ).run(
       orderId,
       orderCode,
@@ -904,6 +1144,11 @@ app.post("/api/orders", (req, res) => {
   const createdRow = db.prepare("SELECT * FROM orders WHERE id = ?").get(result.orderId);
   const order = mapOrderRow(createdRow);
   const history = getOrderHistory(order.id);
+  broadcastAdminEvent("order-created", {
+    orderCode: order.orderCode,
+    customerName: order.customerName,
+    serviceName: order.serviceName
+  });
   res.status(201).json({ order, history });
 });
 app.get("/api/orders/track/:code", (req, res) => {
@@ -940,6 +1185,8 @@ app.get("/api/orders/track/:code", (req, res) => {
       pickupTime: order.pickupTime,
       notes: verified ? order.notes : null,
       status: order.status,
+      paymentStatus: order.paymentStatus,
+      adminDecision: order.adminDecision,
       createdAt: order.createdAt,
       updatedAt: order.updatedAt
     },
@@ -1046,11 +1293,11 @@ app.post("/api/admin/login", (req, res) => {
     res.status(401).json({ error: "Username atau password admin salah." });
     return;
   }
-  setAdminSessionCookie(res, admin);
-  res.json({ authenticated: true, admin });
+  const sessionToken = setAdminSessionCookie(req, res, admin);
+  res.json({ authenticated: true, admin, sessionToken });
 });
-app.post("/api/admin/logout", (_req, res) => {
-  clearAdminSessionCookie(res);
+app.post("/api/admin/logout", (req, res) => {
+  clearAdminSessionCookie(req, res);
   res.json({ ok: true });
 });
 app.post("/api/admin/change-password", requireAdmin, (req, res) => {
@@ -1067,33 +1314,63 @@ app.post("/api/admin/change-password", requireAdmin, (req, res) => {
   }
   res.json({ ok: true, message: "Password admin berhasil diperbarui." });
 });
+app.get("/api/admin/stream", requireAdmin, (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+  adminStreams.add(res);
+  res.write(`event: connected
+data: ${JSON.stringify({ ok: true })}
+
+`);
+  const keepAlive = setInterval(() => {
+    res.write(": ping\n\n");
+  }, 25e3);
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    adminStreams.delete(res);
+  });
+});
 app.get("/api/admin/overview", requireAdmin, (_req, res) => {
-  const orderRows = db.prepare("SELECT * FROM orders ORDER BY created_at DESC").all();
+  const orderRows = db.prepare(
+    `SELECT o.*,
+        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS items_count,
+        (SELECT COUNT(*) FROM clothing_photos cp WHERE cp.order_id = o.id) AS photos_count
+       FROM orders o ORDER BY o.created_at DESC`
+  ).all();
   const orders = orderRows.map(mapOrderRow);
-  const totalOrders = orders.length;
-  const newOrders = orders.filter((o) => o.status === "ORDER_DITERIMA").length;
-  const waitingPickup = orders.filter((o) => o.status === "MENUNGGU_PENJEMPUTAN").length;
-  const inProcess = orders.filter(
-    (o) => ["CUCIAN_TELAH_DIJEMPUT", "CUCIAN_DITERIMA_DI_HUZAVIN", "SEDANG_DICUCI", "SEDANG_DIKERINGKAN", "SEDANG_DISETRIKA"].includes(
-      o.status
-    )
-  ).length;
-  const washingNow = orders.filter((o) => o.status === "SEDANG_DICUCI").length;
-  const readyToDeliver = orders.filter((o) => o.status === "SIAP_DIANTAR").length;
-  const completedOrders = orders.filter((o) => o.status === "PESANAN_SELESAI").length;
-  const totalRevenue = orders.reduce((sum, o) => sum + (o.finalPrice ?? o.estimatedPrice), 0);
+  const now = /* @__PURE__ */ new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const monthStr = now.toISOString().slice(0, 7);
+  const activeNonRejected = orders.filter((o) => o.adminDecision !== "ditolak");
+  const todayRevenue = activeNonRejected.filter((o) => o.createdAt.slice(0, 10) === todayStr && o.paymentStatus === "lunas").reduce((sum, o) => sum + (o.finalPrice ?? o.estimatedPrice), 0);
+  const monthRevenue = activeNonRejected.filter((o) => o.createdAt.slice(0, 7) === monthStr && o.paymentStatus === "lunas").reduce((sum, o) => sum + (o.finalPrice ?? o.estimatedPrice), 0);
+  const totalRevenue = activeNonRejected.reduce((sum, o) => sum + (o.finalPrice ?? o.estimatedPrice), 0);
+  const unpaidOrders = activeNonRejected.filter((o) => o.paymentStatus === "belum_dibayar");
   res.json({
     summary: {
-      totalOrders,
-      newOrders,
-      waitingPickup,
-      inProcess,
-      washingNow,
-      readyToDeliver,
-      completedOrders,
-      totalRevenue
+      totalOrders: orders.length,
+      newOrders: orders.filter((o) => o.status === "ORDER_DITERIMA" && o.adminDecision !== "ditolak").length,
+      waitingPickup: orders.filter((o) => o.status === "MENUNGGU_PENJEMPUTAN").length,
+      pickedUp: orders.filter((o) => o.status === "CUCIAN_TELAH_DIJEMPUT").length,
+      receivedAtWorkshop: orders.filter((o) => o.status === "CUCIAN_DITERIMA_DI_HUZAVIN").length,
+      washingNow: orders.filter((o) => o.status === "SEDANG_DICUCI").length,
+      dryingNow: orders.filter((o) => o.status === "SEDANG_DIKERINGKAN").length,
+      ironingNow: orders.filter((o) => o.status === "SEDANG_DISETRIKA").length,
+      readyToDeliver: orders.filter((o) => o.status === "SIAP_DIANTAR").length,
+      deliveringNow: orders.filter((o) => o.status === "DALAM_PENGANTARAN").length,
+      completedOrders: orders.filter((o) => o.status === "PESANAN_SELESAI").length,
+      todayRevenue,
+      monthRevenue,
+      totalRevenue,
+      totalTransactions: activeNonRejected.length,
+      unpaidOrdersCount: unpaidOrders.length,
+      unpaidAmount: unpaidOrders.reduce((sum, o) => sum + (o.finalPrice ?? o.estimatedPrice), 0)
     },
     orders,
+    clothingItems: getAllClothingItemsWithOrders(),
+    customers: getCustomersDirectory(),
     services: getServices(true),
     gallery: getGalleryItems(),
     testimonials: getTestimonials(true),
@@ -1104,6 +1381,169 @@ app.get("/api/admin/overview", requireAdmin, (_req, res) => {
     }
   });
 });
+app.post("/api/admin/orders/manual", requireAdmin, (req, res) => {
+  const body = req.body ?? {};
+  const rawItems = Array.isArray(body.items) ? body.items : [];
+  const parsedItems = rawItems.map((item) => ({
+    category: String(item.category ?? "").trim(),
+    quantity: Math.max(1, Number.parseInt(String(item.quantity ?? 1), 10) || 1),
+    weightKg: parseWeightInput(item.weightKg),
+    conditionNote: String(item.conditionNote ?? "Normal").trim() || "Normal",
+    specialNote: String(item.specialNote ?? "").trim()
+  }));
+  const totalWeightKg = parseWeightInput(body.totalWeightKg);
+  const orderSource = body.orderSource === "whatsapp" ? "whatsapp" : "manual";
+  const paymentStatus = body.paymentStatus === "lunas" ? "lunas" : "belum_dibayar";
+  const validation = validateManualOrderInput({
+    customerName: String(body.customerName ?? ""),
+    customerPhone: String(body.customerPhone ?? ""),
+    pickupAddress: String(body.pickupAddress ?? ""),
+    serviceId: String(body.serviceId ?? ""),
+    orderSource,
+    paymentStatus,
+    totalWeightKg,
+    notes: String(body.notes ?? ""),
+    items: parsedItems
+  });
+  if (!validation.valid) {
+    res.status(400).json({ error: "Data pesanan manual belum lengkap atau tidak valid.", errors: validation.errors });
+    return;
+  }
+  const serviceRow = db.prepare("SELECT id, name, price_per_kg, includes_ironing FROM services WHERE id = ?").get(String(body.serviceId));
+  if (!serviceRow) {
+    res.status(400).json({ error: "Layanan laundry tidak ditemukan." });
+    return;
+  }
+  const rawPhotos = Array.isArray(body.photos) ? body.photos : [];
+  const savedPhotos = [];
+  try {
+    for (const p of rawPhotos) {
+      if (p?.dataUrl && typeof p.dataUrl === "string") {
+        const saved = saveClothingPhotoFile(p.dataUrl);
+        if (saved) {
+          savedPhotos.push({
+            fileName: saved.fileName,
+            mimeType: saved.mimeType,
+            caption: String(p.caption ?? "").trim(),
+            photoStage: p.photoStage === "sesudah" ? "sesudah" : "sebelum"
+          });
+        }
+      }
+    }
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Foto pakaian tidak valid." });
+    return;
+  }
+  const nowDate = /* @__PURE__ */ new Date();
+  const nowIso = nowDate.toISOString();
+  const normalizedPhone = normalizeWhatsappNumber(String(body.customerPhone));
+  const cleanName = String(body.customerName).trim();
+  const cleanAddress = String(body.pickupAddress ?? "").trim() || "Datang langsung ke workshop Laundry Huzavin";
+  const cleanNotes = String(body.notes ?? "").trim();
+  const totalPrice = calculateEstimatedPrice(totalWeightKg, serviceRow.price_per_kg);
+  const initialStatus = body.initialStatus || "CUCIAN_DITERIMA_DI_HUZAVIN";
+  const pickupDate = String(body.pickupDate ?? "").trim() || nowIso.slice(0, 10);
+  const pickupTime = String(body.pickupTime ?? "").trim() || "Workshop / Manual";
+  const result = db.transaction(() => {
+    const customerRow = db.prepare("SELECT id FROM customers WHERE whatsapp = ?").get(normalizedPhone);
+    let customerId = customerRow?.id;
+    if (customerId) {
+      db.prepare("UPDATE customers SET name = ?, last_address = ?, updated_at = ? WHERE id = ?").run(
+        cleanName,
+        cleanAddress,
+        nowIso,
+        customerId
+      );
+    } else {
+      customerId = crypto4.randomUUID();
+      db.prepare(
+        `INSERT INTO customers (id, name, whatsapp, last_address, last_landmark, created_at, updated_at)
+         VALUES (?, ?, ?, ?, '', ?, ?)`
+      ).run(customerId, cleanName, normalizedPhone, cleanAddress, nowIso, nowIso);
+    }
+    const orderId = crypto4.randomUUID();
+    const orderCode = createNextOrderCode(nowDate);
+    db.prepare(
+      `INSERT INTO orders (
+        id, order_code, customer_id, customer_name, customer_phone,
+        pickup_address, pickup_landmark, service_id, service_name, includes_ironing,
+        price_per_kg, estimated_weight, final_weight, estimated_price, final_price,
+        pickup_date, pickup_time, notes, status, order_source, payment_status, admin_decision,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'diterima', ?, ?)`
+    ).run(
+      orderId,
+      orderCode,
+      customerId,
+      cleanName,
+      normalizedPhone,
+      cleanAddress,
+      serviceRow.id,
+      serviceRow.name,
+      serviceRow.includes_ironing,
+      serviceRow.price_per_kg,
+      totalWeightKg,
+      totalWeightKg,
+      totalPrice,
+      totalPrice,
+      pickupDate,
+      pickupTime,
+      cleanNotes,
+      initialStatus,
+      orderSource,
+      paymentStatus,
+      nowIso,
+      nowIso
+    );
+    const insertItem = db.prepare(
+      `INSERT INTO order_items (id, order_id, category, quantity, weight_kg, condition_note, special_note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const item of parsedItems) {
+      insertItem.run(
+        crypto4.randomUUID(),
+        orderId,
+        item.category,
+        item.quantity,
+        item.weightKg,
+        item.conditionNote,
+        item.specialNote ?? "",
+        nowIso
+      );
+    }
+    const insertPhoto = db.prepare(
+      `INSERT INTO clothing_photos (id, order_id, photo_stage, file_name, mime_type, caption, uploaded_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const photo of savedPhotos) {
+      insertPhoto.run(
+        crypto4.randomUUID(),
+        orderId,
+        photo.photoStage,
+        photo.fileName,
+        photo.mimeType,
+        photo.caption,
+        req.admin?.displayName || "Admin Huzavin",
+        nowIso
+      );
+    }
+    db.prepare(
+      `INSERT INTO order_status_history (id, order_id, status, description, updated_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      crypto4.randomUUID(),
+      orderId,
+      initialStatus,
+      `Pesanan manual (${orderSource === "whatsapp" ? "WhatsApp" : "Datang Langsung"}) dicatat oleh admin dengan ${parsedItems.length} item pakaian.`,
+      req.admin?.displayName || "Admin Huzavin",
+      nowIso
+    );
+    return { orderId, orderCode };
+  })();
+  const createdRow = db.prepare("SELECT * FROM orders WHERE id = ?").get(result.orderId);
+  const order = mapOrderRow(createdRow);
+  res.status(201).json({ order });
+});
 app.get("/api/admin/orders/:id", requireAdmin, (req, res) => {
   const row = db.prepare("SELECT * FROM orders WHERE id = ?").get(String(req.params.id));
   if (!row) {
@@ -1112,7 +1552,9 @@ app.get("/api/admin/orders/:id", requireAdmin, (req, res) => {
   }
   const order = mapOrderRow(row);
   const history = getOrderHistory(order.id);
-  res.json({ order, history });
+  const items = getOrderItems(order.id);
+  const photos = getClothingPhotos(order.id);
+  res.json({ order, history, items, photos });
 });
 app.patch("/api/admin/orders/:id", requireAdmin, (req, res) => {
   const orderId = String(req.params.id);
@@ -1154,17 +1596,40 @@ app.patch("/api/admin/orders/:id", requireAdmin, (req, res) => {
       nextFinalPrice = Math.round(parsedPrice);
     }
   }
+  const nextPaymentStatus = req.body?.paymentStatus === "lunas" ? "lunas" : req.body?.paymentStatus === "belum_dibayar" ? "belum_dibayar" : existing.paymentStatus;
+  const validDecisions = /* @__PURE__ */ new Set(["menunggu", "diterima", "ditolak", "perlu_konfirmasi"]);
+  const nextDecision = validDecisions.has(req.body?.adminDecision) ? req.body.adminDecision : existing.adminDecision;
+  const nextRejectionReason = req.body?.rejectionReason !== void 0 ? String(req.body.rejectionReason).trim() : existing.rejectionReason;
   const statusChanged = nextStatus !== existing.status;
+  const decisionChanged = nextDecision !== existing.adminDecision;
   const statusNote = String(req.body?.statusNote ?? "").trim();
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   db.transaction(() => {
     db.prepare(
       `UPDATE orders
-       SET status = ?, final_weight = ?, final_price = ?, updated_at = ?
+       SET status = ?, final_weight = ?, final_price = ?, payment_status = ?, admin_decision = ?, rejection_reason = ?, updated_at = ?
        WHERE id = ?`
-    ).run(nextStatus, nextFinalWeight, nextFinalPrice, nowIso, orderId);
-    if (statusChanged || statusNote) {
-      const stageDesc = statusNote || ORDER_STAGES.find((s) => s.code === nextStatus)?.description || `Status diperbarui ke ${getStageLabel(nextStatus)}.`;
+    ).run(
+      nextStatus,
+      nextFinalWeight,
+      nextFinalPrice,
+      nextPaymentStatus,
+      nextDecision,
+      nextRejectionReason,
+      nowIso,
+      orderId
+    );
+    if (statusChanged || decisionChanged || statusNote) {
+      let stageDesc = statusNote;
+      if (!stageDesc) {
+        if (decisionChanged && nextDecision === "ditolak") {
+          stageDesc = `Pesanan ditolak admin${nextRejectionReason ? `: ${nextRejectionReason}` : "."}`;
+        } else if (decisionChanged && nextDecision === "perlu_konfirmasi") {
+          stageDesc = "Admin meminta konfirmasi ulang kepada pelanggan via WhatsApp.";
+        } else {
+          stageDesc = ORDER_STAGES.find((s) => s.code === nextStatus)?.description || `Status diperbarui ke ${getStageLabel(nextStatus)}.`;
+        }
+      }
       db.prepare(
         `INSERT INTO order_status_history (id, order_id, status, description, updated_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`
@@ -1182,16 +1647,129 @@ app.patch("/api/admin/orders/:id", requireAdmin, (req, res) => {
   const updatedRow = db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
   const order = mapOrderRow(updatedRow);
   const history = getOrderHistory(orderId);
-  res.json({ order, history });
+  const items = getOrderItems(orderId);
+  const photos = getClothingPhotos(orderId);
+  res.json({ order, history, items, photos });
 });
 app.delete("/api/admin/orders/:id", requireAdmin, (req, res) => {
   const orderId = String(req.params.id);
+  const photos = getClothingPhotos(orderId);
   const result = db.prepare("DELETE FROM orders WHERE id = ?").run(orderId);
   if (result.changes === 0) {
     res.status(404).json({ error: "Pesanan tidak ditemukan." });
     return;
   }
+  for (const photo of photos) {
+    deleteClothingPhotoFile(photo.fileName);
+  }
   res.json({ ok: true });
+});
+app.post("/api/admin/orders/:id/items", requireAdmin, (req, res) => {
+  const orderId = String(req.params.id);
+  const category = String(req.body?.category ?? "").trim();
+  const quantity = Math.max(1, Number.parseInt(String(req.body?.quantity ?? 1), 10) || 1);
+  const weightKg = parseWeightInput(req.body?.weightKg ?? 0);
+  const conditionNote = String(req.body?.conditionNote ?? "Normal").trim() || "Normal";
+  const specialNote = String(req.body?.specialNote ?? "").trim();
+  if (!category) {
+    res.status(400).json({ error: "Jenis pakaian wajib diisi." });
+    return;
+  }
+  db.prepare(
+    `INSERT INTO order_items (id, order_id, category, quantity, weight_kg, condition_note, special_note, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(crypto4.randomUUID(), orderId, category, quantity, weightKg, conditionNote, specialNote, (/* @__PURE__ */ new Date()).toISOString());
+  res.status(201).json({ items: getOrderItems(orderId) });
+});
+app.put("/api/admin/order-items/:itemId", requireAdmin, (req, res) => {
+  const itemId = String(req.params.itemId);
+  const existing = db.prepare("SELECT order_id FROM order_items WHERE id = ?").get(itemId);
+  if (!existing) {
+    res.status(404).json({ error: "Item pakaian tidak ditemukan." });
+    return;
+  }
+  const category = String(req.body?.category ?? "").trim();
+  const quantity = Math.max(1, Number.parseInt(String(req.body?.quantity ?? 1), 10) || 1);
+  const weightKg = parseWeightInput(req.body?.weightKg ?? 0);
+  const conditionNote = String(req.body?.conditionNote ?? "Normal").trim() || "Normal";
+  const specialNote = String(req.body?.specialNote ?? "").trim();
+  if (!category) {
+    res.status(400).json({ error: "Jenis pakaian wajib diisi." });
+    return;
+  }
+  db.prepare(
+    `UPDATE order_items SET category = ?, quantity = ?, weight_kg = ?, condition_note = ?, special_note = ? WHERE id = ?`
+  ).run(category, quantity, weightKg, conditionNote, specialNote, itemId);
+  res.json({ items: getOrderItems(existing.order_id) });
+});
+app.delete("/api/admin/order-items/:itemId", requireAdmin, (req, res) => {
+  const itemId = String(req.params.itemId);
+  const existing = db.prepare("SELECT order_id FROM order_items WHERE id = ?").get(itemId);
+  if (!existing) {
+    res.status(404).json({ error: "Item pakaian tidak ditemukan." });
+    return;
+  }
+  db.prepare("DELETE FROM order_items WHERE id = ?").run(itemId);
+  res.json({ items: getOrderItems(existing.order_id) });
+});
+app.post("/api/admin/orders/:id/photos", requireAdmin, (req, res) => {
+  const orderId = String(req.params.id);
+  const orderExists = db.prepare("SELECT id FROM orders WHERE id = ?").get(orderId);
+  if (!orderExists) {
+    res.status(404).json({ error: "Pesanan tidak ditemukan." });
+    return;
+  }
+  const dataUrl = String(req.body?.dataUrl ?? "");
+  const caption = String(req.body?.caption ?? "").trim();
+  const photoStage = req.body?.photoStage === "sesudah" ? "sesudah" : "sebelum";
+  try {
+    const saved = saveClothingPhotoFile(dataUrl);
+    if (!saved) {
+      res.status(400).json({ error: "Format gambar tidak didukung (gunakan JPG, PNG, atau WEBP)." });
+      return;
+    }
+    db.prepare(
+      `INSERT INTO clothing_photos (id, order_id, photo_stage, file_name, mime_type, caption, uploaded_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      crypto4.randomUUID(),
+      orderId,
+      photoStage,
+      saved.fileName,
+      saved.mimeType,
+      caption,
+      req.admin?.displayName || "Admin Huzavin",
+      (/* @__PURE__ */ new Date()).toISOString()
+    );
+    res.status(201).json({ photos: getClothingPhotos(orderId) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Gagal menyimpan foto." });
+  }
+});
+app.get("/api/admin/clothing-photos/:photoId/file", requireAdmin, (req, res) => {
+  const photo = db.prepare("SELECT file_name, mime_type FROM clothing_photos WHERE id = ?").get(String(req.params.photoId));
+  if (!photo) {
+    res.status(404).json({ error: "Foto tidak ditemukan." });
+    return;
+  }
+  const fullPath = path3.join(clothingUploadsDir, path3.basename(photo.file_name));
+  if (!fs3.existsSync(fullPath)) {
+    res.status(404).json({ error: "File foto tidak ditemukan." });
+    return;
+  }
+  res.setHeader("Content-Type", photo.mime_type);
+  res.setHeader("Cache-Control", "no-store, private");
+  res.sendFile(fullPath);
+});
+app.delete("/api/admin/clothing-photos/:photoId", requireAdmin, (req, res) => {
+  const photo = db.prepare("SELECT order_id, file_name FROM clothing_photos WHERE id = ?").get(String(req.params.photoId));
+  if (!photo) {
+    res.status(404).json({ error: "Foto tidak ditemukan." });
+    return;
+  }
+  db.prepare("DELETE FROM clothing_photos WHERE id = ?").run(String(req.params.photoId));
+  deleteClothingPhotoFile(photo.file_name);
+  res.json({ photos: getClothingPhotos(photo.order_id) });
 });
 app.put("/api/admin/services/:id", requireAdmin, (req, res) => {
   const id = String(req.params.id);

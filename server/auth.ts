@@ -101,28 +101,82 @@ export function authenticateAdminCredentials(username: string, password: string)
   };
 }
 
-export function setAdminSessionCookie(res: Response, admin: AdminUserInfo): void {
-  const token = signToken({
+function isHttpsRequest(req: Request): boolean {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] ?? '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const origin = String(req.headers.origin ?? '').toLowerCase();
+  const referer = String(req.headers.referer ?? '').toLowerCase();
+  return (
+    req.secure ||
+    forwardedProto === 'https' ||
+    req.protocol === 'https' ||
+    origin.startsWith('https://') ||
+    referer.startsWith('https://')
+  );
+}
+
+export function createAdminSessionToken(admin: AdminUserInfo): string {
+  return signToken({
     adminId: admin.id,
     username: admin.username,
     exp: Date.now() + SESSION_TTL_MS,
   });
+}
+
+export function setAdminSessionCookie(req: Request, res: Response, admin: AdminUserInfo): string {
+  const token = createAdminSessionToken(admin);
+  const https = isHttpsRequest(req);
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production' && process.env.APP_URL?.startsWith('https://'),
+    sameSite: https ? 'none' : 'lax',
+    secure: https,
     maxAge: SESSION_TTL_MS,
+    path: '/',
+  });
+  return token;
+}
+
+export function clearAdminSessionCookie(req: Request, res: Response): void {
+  const https = isHttpsRequest(req);
+  res.clearCookie(COOKIE_NAME, {
+    httpOnly: true,
+    sameSite: https ? 'none' : 'lax',
+    secure: https,
     path: '/',
   });
 }
 
-export function clearAdminSessionCookie(res: Response): void {
-  res.clearCookie(COOKIE_NAME, { path: '/' });
+function extractTokenFromRequest(req: Request): string | null {
+  const cookieToken = req.cookies?.[COOKIE_NAME];
+  if (typeof cookieToken === 'string' && cookieToken.trim()) {
+    return cookieToken.trim();
+  }
+
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+    const bearer = authHeader.slice(7).trim();
+    if (bearer) return bearer;
+  }
+
+  // EventSource & protected <img> tags inside strict cross-origin iframes cannot attach custom headers
+  if (
+    req.method === 'GET' &&
+    (req.path === '/api/admin/stream' || req.path.startsWith('/api/admin/clothing-photos/'))
+  ) {
+    const qToken = req.query?.token;
+    if (typeof qToken === 'string' && qToken.trim()) {
+      return qToken.trim();
+    }
+  }
+
+  return null;
 }
 
 export function readAdminFromRequest(req: Request): AdminUserInfo | null {
-  const token = req.cookies?.[COOKIE_NAME];
-  if (!token || typeof token !== 'string') return null;
+  const token = extractTokenFromRequest(req);
+  if (!token) return null;
   const payload = verifyToken(token);
   if (!payload) return null;
 

@@ -58,12 +58,12 @@ export function HeroSection({ settings }: HeroSectionProps) {
               {settings.sloganSecondary}
             </p>
 
-            <div className="flex flex-wrap items-center gap-3.5">
+            <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3">
               <a
                 href={whatsappUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-sm sm:text-base shadow-md shadow-sky-600/20 transition-all hover:-translate-y-0.5 whitespace-nowrap shrink-0"
+                className="min-h-[48px] inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-sm sm:text-base shadow-md shadow-sky-600/20 transition-all hover:-translate-y-0.5 whitespace-nowrap shrink-0"
               >
                 <MessageCircle className="w-5 h-5" aria-hidden="true" />
                 ORDER VIA WHATSAPP
@@ -71,7 +71,7 @@ export function HeroSection({ settings }: HeroSectionProps) {
 
               <a
                 href="#kalkulator"
-                className="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-2xl bg-white hover:bg-sky-50 text-sky-800 border border-sky-200 font-bold text-sm sm:text-base transition-colors whitespace-nowrap shrink-0"
+                className="min-h-[48px] inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-2xl bg-white hover:bg-sky-50 text-sky-800 border border-sky-200 font-bold text-sm sm:text-base transition-colors whitespace-nowrap shrink-0"
               >
                 <Calculator className="w-5 h-5 text-sky-600" aria-hidden="true" />
                 HITUNG HARGA

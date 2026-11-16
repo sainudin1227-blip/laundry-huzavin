@@ -12,6 +12,8 @@ import {
   buildGeneralWhatsappUrl,
   formatRupiah,
   formatWeightKg,
+  getAdminDecisionLabel,
+  getPaymentStatusLabel,
   getStageIndex,
   getVisibleStagesForService,
 } from '../lib/laundryRules';
@@ -192,13 +194,13 @@ export function OrderTracker({ settings, savedOrders, requestedOrderCode }: Orde
                 value={searchCode}
                 onChange={(e) => setSearchCode(e.target.value)}
                 placeholder="Masukkan Kode Order (contoh: HZV-202611-0001)"
-                className="w-full pl-11 pr-4 py-3 rounded-xl bg-white border border-sky-100 focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none text-sm font-mono uppercase text-slate-900"
+                className="w-full min-h-[48px] pl-11 pr-4 py-3 rounded-xl bg-white border border-sky-100 focus:border-sky-500 focus:ring-2 focus:ring-sky-200 outline-none text-sm font-mono uppercase text-slate-900"
               />
             </div>
             <button
               type="submit"
               disabled={loading}
-              className="px-6 py-3 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-sky-400 text-white font-bold text-sm transition-colors whitespace-nowrap shrink-0"
+              className="min-h-[48px] px-6 py-3 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-sky-400 text-white font-bold text-sm transition-colors whitespace-nowrap shrink-0"
             >
               {loading ? 'Mencari...' : 'CEK STATUS'}
             </button>
@@ -268,9 +270,9 @@ export function OrderTracker({ settings, savedOrders, requestedOrderCode }: Orde
                 </h3>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2">
                 <div
-                  className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold border ${
+                  className={`px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold border ${
                     tracked.order.status === 'PESANAN_SELESAI'
                       ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                       : 'bg-sky-100 border-sky-300 text-sky-900'
@@ -278,6 +280,20 @@ export function OrderTracker({ settings, savedOrders, requestedOrderCode }: Orde
                 >
                   {visibleStages.find((s) => s.code === tracked.order.status)?.label ?? tracked.order.status}
                 </div>
+                <div
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold border ${
+                    tracked.order.paymentStatus === 'lunas'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-amber-50 border-amber-200 text-amber-800'
+                  }`}
+                >
+                  {getPaymentStatusLabel(tracked.order.paymentStatus)}
+                </div>
+                {tracked.order.adminDecision !== 'menunggu' && (
+                  <div className="px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-sky-200 text-slate-700">
+                    Admin: {getAdminDecisionLabel(tracked.order.adminDecision)}
+                  </div>
+                )}
               </div>
             </div>
 

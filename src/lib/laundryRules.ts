@@ -82,6 +82,55 @@ export const ORDER_STAGES: OrderStageDefinition[] = [
   },
 ];
 
+export type OrderSource = 'website' | 'manual' | 'whatsapp';
+export type PaymentStatus = 'belum_dibayar' | 'lunas';
+export type AdminDecision = 'menunggu' | 'diterima' | 'ditolak' | 'perlu_konfirmasi';
+export type PhotoStage = 'sebelum' | 'sesudah';
+
+export const CLOTHING_CATEGORIES = [
+  'Kaos',
+  'Kemeja',
+  'Celana panjang',
+  'Celana pendek',
+  'Jaket',
+  'Sweater',
+  'Hoodie',
+  'Baju anak',
+  'Pakaian dalam',
+  'Handuk',
+  'Sprei',
+  'Selimut',
+  'Lainnya',
+] as const;
+
+export const CLOTHING_CONDITIONS = [
+  'Normal',
+  'Bernoda',
+  'Kotor Berat',
+  'Bahan Halus / Rentan',
+  'Ada Kerusakan Kecil',
+] as const;
+
+export interface ManualClothingItemInput {
+  category: string;
+  quantity: number;
+  weightKg: number;
+  conditionNote: string;
+  specialNote?: string;
+}
+
+export interface ManualOrderInput {
+  customerName: string;
+  customerPhone: string;
+  pickupAddress: string;
+  serviceId: string;
+  orderSource: OrderSource;
+  paymentStatus: PaymentStatus;
+  totalWeightKg: number;
+  notes?: string;
+  items: ManualClothingItemInput[];
+}
+
 export interface ServiceItem {
   id: string;
   slug: string;
@@ -128,6 +177,74 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   whatsappRaw: '6289515559477',
   whatsappDisplay: '089515559477',
 };
+
+export function sumOrderItemsWeight(items: Array<{ weightKg: number }>): number {
+  const total = items.reduce((acc, item) => acc + (Number.isFinite(item.weightKg) && item.weightKg > 0 ? item.weightKg : 0), 0);
+  return Math.round(total * 100) / 100;
+}
+
+export function getPaymentStatusLabel(status: PaymentStatus): string {
+  return status === 'lunas' ? 'Lunas' : 'Belum Dibayar';
+}
+
+export function getAdminDecisionLabel(decision: AdminDecision): string {
+  switch (decision) {
+    case 'diterima':
+      return 'Diterima';
+    case 'ditolak':
+      return 'Ditolak';
+    case 'perlu_konfirmasi':
+      return 'Perlu Konfirmasi';
+    default:
+      return 'Menunggu Konfirmasi';
+  }
+}
+
+export function getOrderSourceLabel(source: OrderSource): string {
+  switch (source) {
+    case 'manual':
+      return 'Datang Langsung';
+    case 'whatsapp':
+      return 'WhatsApp';
+    default:
+      return 'Booking Website';
+  }
+}
+
+export function validateManualOrderInput(input: ManualOrderInput): ValidationResult {
+  const errors: Record<string, string> = {};
+
+  if (!input.customerName || input.customerName.trim().length < 2) {
+    errors.customerName = 'Nama pelanggan wajib diisi.';
+  }
+
+  const normalizedPhone = normalizeWhatsappNumber(input.customerPhone || '');
+  if (!normalizedPhone || normalizedPhone.length < 10 || normalizedPhone.length > 15) {
+    errors.customerPhone = 'Nomor WhatsApp tidak valid.';
+  }
+
+  if (!input.serviceId) {
+    errors.serviceId = 'Jenis layanan wajib dipilih.';
+  }
+
+  if (!Array.isArray(input.items) || input.items.length === 0) {
+    errors.items = 'Minimal 1 jenis pakaian wajib ditambahkan.';
+  } else {
+    const invalidItem = input.items.some((item) => !item.category.trim() || item.quantity < 1);
+    if (invalidItem) {
+      errors.items = 'Setiap item pakaian wajib memiliki kategori dan jumlah minimal 1.';
+    }
+  }
+
+  if (!Number.isFinite(input.totalWeightKg) || input.totalWeightKg < 1) {
+    errors.totalWeightKg = 'Total berat cucian minimal 1 kg.';
+  }
+
+  return {
+    valid: Object.keys(errors).length === 0,
+    errors,
+  };
+}
 
 export function parseWeightInput(raw: string | number): number {
   if (typeof raw === 'number') {

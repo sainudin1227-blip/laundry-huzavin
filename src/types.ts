@@ -1,4 +1,12 @@
-import type { OrderStatusCode, ServiceItem, SiteSettings } from './lib/laundryRules';
+import type {
+  AdminDecision,
+  OrderSource,
+  OrderStatusCode,
+  PaymentStatus,
+  PhotoStage,
+  ServiceItem,
+  SiteSettings,
+} from './lib/laundryRules';
 
 export interface GalleryItem {
   id: string;
@@ -38,9 +46,39 @@ export interface OrderHistoryItem {
   createdAt: string;
 }
 
+export interface OrderItemClient {
+  id: string;
+  orderId: string;
+  category: string;
+  quantity: number;
+  weightKg: number;
+  conditionNote: string;
+  specialNote: string;
+  createdAt: string;
+  // Joined order fields when viewed in Data Pakaian
+  orderCode?: string;
+  customerName?: string;
+  orderStatus?: OrderStatusCode;
+  serviceName?: string;
+  orderCreatedAt?: string;
+  photoCount?: number;
+  firstPhotoUrl?: string | null;
+}
+
+export interface ClothingPhotoClient {
+  id: string;
+  orderId: string;
+  photoStage: PhotoStage;
+  imageUrl: string;
+  caption: string;
+  uploadedBy: string;
+  createdAt: string;
+}
+
 export interface OrderRecordClient {
   id: string;
   orderCode: string;
+  customerId: string | null;
   customerName: string;
   customerPhone: string;
   pickupAddress: string;
@@ -57,8 +95,14 @@ export interface OrderRecordClient {
   pickupTime: string;
   notes: string;
   status: OrderStatusCode;
+  orderSource: OrderSource;
+  paymentStatus: PaymentStatus;
+  adminDecision: AdminDecision;
+  rejectionReason: string;
   createdAt: string;
   updatedAt: string;
+  itemsCount?: number;
+  photosCount?: number;
 }
 
 export interface TrackedOrderPayload {
@@ -78,6 +122,8 @@ export interface TrackedOrderPayload {
     pickupTime: string;
     notes: string | null;
     status: OrderStatusCode;
+    paymentStatus: PaymentStatus;
+    adminDecision: AdminDecision;
     createdAt: string;
     updatedAt: string;
   };
@@ -98,18 +144,41 @@ export interface AdminUser {
   mustChangePassword: boolean;
 }
 
+export interface CustomerDirectoryItem {
+  id: string;
+  name: string;
+  whatsapp: string;
+  lastAddress: string;
+  lastLandmark: string;
+  ordersCount: number;
+  totalSpent: number;
+  lastOrderAt: string | null;
+  createdAt: string;
+}
+
 export interface AdminOverviewData {
   summary: {
     totalOrders: number;
     newOrders: number;
     waitingPickup: number;
-    inProcess: number;
+    pickedUp: number;
+    receivedAtWorkshop: number;
     washingNow: number;
+    dryingNow: number;
+    ironingNow: number;
     readyToDeliver: number;
+    deliveringNow: number;
     completedOrders: number;
+    todayRevenue: number;
+    monthRevenue: number;
     totalRevenue: number;
+    totalTransactions: number;
+    unpaidOrdersCount: number;
+    unpaidAmount: number;
   };
   orders: OrderRecordClient[];
+  clothingItems: OrderItemClient[];
+  customers: CustomerDirectoryItem[];
   services: ServiceItem[];
   gallery: GalleryItem[];
   testimonials: TestimonialItem[];

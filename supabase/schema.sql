@@ -1,6 +1,8 @@
 -- ============================================================================
--- LAUNDRY HUZAVIN — SUPABASE POSTGRESQL SCHEMA & RLS POLICIES
+-- LAUNDRY HUZAVIN — SUPABASE POSTGRESQL SCHEMA & RLS POLICIES (v3)
 -- Jalankan SQL ini di Supabase SQL Editor apabila menghubungkan ke Supabase.
+-- Menambahkan tabel order_items, clothing_photos, dan kolom payment/decision
+-- tanpa menghapus data tabel lama.
 -- ============================================================================
 
 create extension if not exists "pgcrypto";
@@ -50,11 +52,38 @@ create table if not exists public.orders (
   pickup_time text not null,
   notes text not null default '',
   status text not null default 'ORDER_DITERIMA',
+  order_source text not null default 'website' check (order_source in ('website', 'manual', 'whatsapp')),
+  payment_status text not null default 'belum_dibayar' check (payment_status in ('belum_dibayar', 'lunas')),
+  admin_decision text not null default 'menunggu' check (admin_decision in ('menunggu', 'diterima', 'ditolak', 'perlu_konfirmasi')),
+  rejection_reason text not null default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
--- 4. ORDER STATUS HISTORY
+-- 4. ORDER ITEMS (DATA PAKAIAN PER PESANAN)
+create table if not exists public.order_items (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references public.orders(id) on delete cascade,
+  category text not null,
+  quantity integer not null check (quantity >= 1),
+  weight_kg numeric(6,2) not null default 0,
+  condition_note text not null default 'Normal',
+  special_note text not null default '',
+  created_at timestamptz not null default now()
+);
+
+-- 5. CLOTHING PHOTOS (DOKUMENTASI FOTO PAKAIAN TERBATAS)
+create table if not exists public.clothing_photos (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references public.orders(id) on delete cascade,
+  photo_stage text not null default 'sebelum' check (photo_stage in ('sebelum', 'sesudah')),
+  storage_path text not null,
+  caption text not null default '',
+  uploaded_by text not null default 'Admin Huzavin',
+  created_at timestamptz not null default now()
+);
+
+-- 6. ORDER STATUS HISTORY
 create table if not exists public.order_status_history (
   id uuid primary key default gen_random_uuid(),
   order_id uuid not null references public.orders(id) on delete cascade,
@@ -64,7 +93,7 @@ create table if not exists public.order_status_history (
   created_at timestamptz not null default now()
 );
 
--- 5. GALLERY
+-- 7. GALLERY
 create table if not exists public.gallery (
   id uuid primary key default gen_random_uuid(),
   title text not null,
@@ -77,7 +106,7 @@ create table if not exists public.gallery (
   created_at timestamptz not null default now()
 );
 
--- 6. TESTIMONIALS
+-- 8. TESTIMONIALS
 create table if not exists public.testimonials (
   id uuid primary key default gen_random_uuid(),
   customer_name text not null,
@@ -88,7 +117,7 @@ create table if not exists public.testimonials (
   created_at timestamptz not null default now()
 );
 
--- 7. ADMIN PROFILES
+-- 9. ADMIN PROFILES
 create table if not exists public.admin_profiles (
   id uuid primary key default gen_random_uuid(),
   auth_user_id uuid unique,
@@ -99,14 +128,14 @@ create table if not exists public.admin_profiles (
   updated_at timestamptz not null default now()
 );
 
--- 8. SITE SETTINGS
+-- 10. SITE SETTINGS
 create table if not exists public.site_settings (
   key text primary key,
   value text not null,
   updated_at timestamptz not null default now()
 );
 
--- 9. CHATBOT CONVERSATIONS
+-- 11. CHATBOT CONVERSATIONS
 create table if not exists public.chatbot_conversations (
   id uuid primary key default gen_random_uuid(),
   session_id text not null,
@@ -120,6 +149,8 @@ create table if not exists public.chatbot_conversations (
 alter table public.services enable row level security;
 alter table public.customers enable row level security;
 alter table public.orders enable row level security;
+alter table public.order_items enable row level security;
+alter table public.clothing_photos enable row level security;
 alter table public.order_status_history enable row level security;
 alter table public.gallery enable row level security;
 alter table public.testimonials enable row level security;
@@ -127,7 +158,6 @@ alter table public.admin_profiles enable row level security;
 alter table public.site_settings enable row level security;
 alter table public.chatbot_conversations enable row level security;
 
--- Public read access only for non-sensitive catalog/content tables
 create policy "Public read active services" on public.services
   for select using (is_active = true);
 
@@ -140,9 +170,24 @@ create policy "Public read published testimonials" on public.testimonials
 create policy "Public read site settings" on public.site_settings
   for select using (true);
 
--- Sensitive customer/order/admin tables are accessed strictly via verified server-side routes (Service Role)
--- or authenticated admin profiles.
+-- Only authenticated admins can read/write orders, items, photos, and history directly
 create policy "Admin full access orders" on public.orders
+  for all using (
+    exists (
+      select 1 from public.admin_profiles ap
+      where ap.auth_user_id = auth.uid()
+    )
+  );
+
+create policy "Admin full access order items" on public.order_items
+  for all using (
+    exists (
+      select 1 from public.admin_profiles ap
+      where ap.auth_user_id = auth.uid()
+    )
+  );
+
+create policy "Admin full access clothing photos" on public.clothing_photos
   for all using (
     exists (
       select 1 from public.admin_profiles ap

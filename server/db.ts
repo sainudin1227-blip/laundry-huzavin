@@ -4,9 +4,13 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import {
+  AdminDecision,
   DEFAULT_SITE_SETTINGS,
   generateOrderCode,
+  OrderSource,
   OrderStatusCode,
+  PaymentStatus,
+  PhotoStage,
   ServiceItem,
   SiteSettings,
 } from '../src/lib/laundryRules';
@@ -14,6 +18,11 @@ import {
 const dataDir = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
+}
+
+export const clothingUploadsDir = path.join(dataDir, 'uploads', 'clothing');
+if (!fs.existsSync(clothingUploadsDir)) {
+  fs.mkdirSync(clothingUploadsDir, { recursive: true });
 }
 
 const dbPath = path.join(dataDir, 'huzavin.db');
@@ -41,8 +50,14 @@ export interface OrderRecord {
   pickupTime: string;
   notes: string;
   status: OrderStatusCode;
+  orderSource: OrderSource;
+  paymentStatus: PaymentStatus;
+  adminDecision: AdminDecision;
+  rejectionReason: string;
   createdAt: string;
   updatedAt: string;
+  itemsCount?: number;
+  photosCount?: number;
 }
 
 export interface OrderHistoryRecord {
@@ -51,6 +66,48 @@ export interface OrderHistoryRecord {
   status: OrderStatusCode;
   description: string;
   updatedBy: string;
+  createdAt: string;
+}
+
+export interface OrderItemRecord {
+  id: string;
+  orderId: string;
+  category: string;
+  quantity: number;
+  weightKg: number;
+  conditionNote: string;
+  specialNote: string;
+  createdAt: string;
+  orderCode?: string;
+  customerName?: string;
+  orderStatus?: OrderStatusCode;
+  serviceName?: string;
+  orderCreatedAt?: string;
+  photoCount?: number;
+  firstPhotoUrl?: string | null;
+}
+
+export interface ClothingPhotoRecord {
+  id: string;
+  orderId: string;
+  photoStage: PhotoStage;
+  fileName: string;
+  mimeType: string;
+  imageUrl: string;
+  caption: string;
+  uploadedBy: string;
+  createdAt: string;
+}
+
+export interface CustomerDirectoryRecord {
+  id: string;
+  name: string;
+  whatsapp: string;
+  lastAddress: string;
+  lastLandmark: string;
+  ordersCount: number;
+  totalSpent: number;
+  lastOrderAt: string | null;
   createdAt: string;
 }
 
@@ -74,6 +131,24 @@ export interface TestimonialRecord {
   comment: string;
   isPublished: boolean;
   createdAt: string;
+}
+
+function ensureOrdersColumns(): void {
+  const cols = db.prepare('PRAGMA table_info(orders)').all() as Array<{ name: string }>;
+  const colNames = new Set(cols.map((c) => c.name));
+
+  if (!colNames.has('order_source')) {
+    db.exec("ALTER TABLE orders ADD COLUMN order_source TEXT NOT NULL DEFAULT 'website'");
+  }
+  if (!colNames.has('payment_status')) {
+    db.exec("ALTER TABLE orders ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'belum_dibayar'");
+  }
+  if (!colNames.has('admin_decision')) {
+    db.exec("ALTER TABLE orders ADD COLUMN admin_decision TEXT NOT NULL DEFAULT 'menunggu'");
+  }
+  if (!colNames.has('rejection_reason')) {
+    db.exec("ALTER TABLE orders ADD COLUMN rejection_reason TEXT NOT NULL DEFAULT ''");
+  }
 }
 
 export function initDatabase(): void {
@@ -121,8 +196,34 @@ export function initDatabase(): void {
       pickup_time TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'ORDER_DITERIMA',
+      order_source TEXT NOT NULL DEFAULT 'website',
+      payment_status TEXT NOT NULL DEFAULT 'belum_dibayar',
+      admin_decision TEXT NOT NULL DEFAULT 'menunggu',
+      rejection_reason TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS order_items (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      category TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 1,
+      weight_kg REAL NOT NULL DEFAULT 0,
+      condition_note TEXT NOT NULL DEFAULT 'Normal',
+      special_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS clothing_photos (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      photo_stage TEXT NOT NULL DEFAULT 'sebelum',
+      file_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+      caption TEXT NOT NULL DEFAULT '',
+      uploaded_by TEXT NOT NULL DEFAULT 'Admin Huzavin',
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS order_status_history (
@@ -181,9 +282,10 @@ export function initDatabase(): void {
     );
   `);
 
+  ensureOrdersColumns();
+
   const now = new Date().toISOString();
 
-  // Seed initial services if empty
   const serviceCount = db.prepare('SELECT COUNT(*) as count FROM services').get() as { count: number };
   if (serviceCount.count === 0) {
     const insertService = db.prepare(`
@@ -216,7 +318,6 @@ export function initDatabase(): void {
     );
   }
 
-  // Seed default site settings if missing
   const upsertSetting = db.prepare(`
     INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES (?, ?, ?)
   `);
@@ -227,7 +328,6 @@ export function initDatabase(): void {
   upsertSetting.run('whatsappRaw', DEFAULT_SITE_SETTINGS.whatsappRaw, now);
   upsertSetting.run('whatsappDisplay', DEFAULT_SITE_SETTINGS.whatsappDisplay, now);
 
-  // Seed honest illustration gallery entries if empty (admin can replace with real photos anytime)
   const galleryCount = db.prepare('SELECT COUNT(*) as count FROM gallery').get() as { count: number };
   if (galleryCount.count === 0) {
     const insertGallery = db.prepare(`
@@ -269,7 +369,6 @@ export function initDatabase(): void {
     );
   }
 
-  // Seed initial admin user if empty (huzavin / abiumi hashed via bcrypt)
   const adminCount = db.prepare('SELECT COUNT(*) as count FROM admin_profiles').get() as { count: number };
   if (adminCount.count === 0) {
     const initialPassword = process.env.INITIAL_ADMIN_PASSWORD || 'abiumi';
@@ -404,8 +503,14 @@ export function mapOrderRow(row: Record<string, unknown>): OrderRecord {
     pickupTime: String(row.pickup_time),
     notes: String(row.notes ?? ''),
     status: String(row.status) as OrderStatusCode,
+    orderSource: (row.order_source ? String(row.order_source) : 'website') as OrderSource,
+    paymentStatus: (row.payment_status ? String(row.payment_status) : 'belum_dibayar') as PaymentStatus,
+    adminDecision: (row.admin_decision ? String(row.admin_decision) : 'menunggu') as AdminDecision,
+    rejectionReason: String(row.rejection_reason ?? ''),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    itemsCount: row.items_count !== undefined ? Number(row.items_count) : undefined,
+    photosCount: row.photos_count !== undefined ? Number(row.photos_count) : undefined,
   };
 }
 
@@ -432,6 +537,177 @@ export function getOrderHistory(orderId: string): OrderHistoryRecord[] {
     updatedBy: r.updated_by,
     createdAt: r.created_at,
   }));
+}
+
+export function getOrderItems(orderId: string): OrderItemRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT id, order_id, category, quantity, weight_kg, condition_note, special_note, created_at
+       FROM order_items WHERE order_id = ? ORDER BY created_at ASC`
+    )
+    .all(orderId) as Array<{
+    id: string;
+    order_id: string;
+    category: string;
+    quantity: number;
+    weight_kg: number;
+    condition_note: string;
+    special_note: string;
+    created_at: string;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    orderId: r.order_id,
+    category: r.category,
+    quantity: r.quantity,
+    weightKg: r.weight_kg,
+    conditionNote: r.condition_note,
+    specialNote: r.special_note,
+    createdAt: r.created_at,
+  }));
+}
+
+export function getClothingPhotos(orderId: string): ClothingPhotoRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT id, order_id, photo_stage, file_name, mime_type, caption, uploaded_by, created_at
+       FROM clothing_photos WHERE order_id = ? ORDER BY created_at DESC`
+    )
+    .all(orderId) as Array<{
+    id: string;
+    order_id: string;
+    photo_stage: string;
+    file_name: string;
+    mime_type: string;
+    caption: string;
+    uploaded_by: string;
+    created_at: string;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    orderId: r.order_id,
+    photoStage: r.photo_stage as PhotoStage,
+    fileName: r.file_name,
+    mimeType: r.mime_type,
+    imageUrl: `/api/admin/clothing-photos/${r.id}/file`,
+    caption: r.caption,
+    uploadedBy: r.uploaded_by,
+    createdAt: r.created_at,
+  }));
+}
+
+export function getAllClothingItemsWithOrders(): OrderItemRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT
+         oi.id, oi.order_id, oi.category, oi.quantity, oi.weight_kg, oi.condition_note, oi.special_note, oi.created_at,
+         o.order_code, o.customer_name, o.status AS order_status, o.service_name, o.created_at AS order_created_at,
+         (SELECT COUNT(*) FROM clothing_photos cp WHERE cp.order_id = o.id) AS photo_count,
+         (SELECT cp.id FROM clothing_photos cp WHERE cp.order_id = o.id ORDER BY cp.created_at DESC LIMIT 1) AS first_photo_id
+       FROM order_items oi
+       INNER JOIN orders o ON o.id = oi.order_id
+       ORDER BY oi.created_at DESC`
+    )
+    .all() as Array<{
+    id: string;
+    order_id: string;
+    category: string;
+    quantity: number;
+    weight_kg: number;
+    condition_note: string;
+    special_note: string;
+    created_at: string;
+    order_code: string;
+    customer_name: string;
+    order_status: string;
+    service_name: string;
+    order_created_at: string;
+    photo_count: number;
+    first_photo_id: string | null;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    orderId: r.order_id,
+    category: r.category,
+    quantity: r.quantity,
+    weightKg: r.weight_kg,
+    conditionNote: r.condition_note,
+    specialNote: r.special_note,
+    createdAt: r.created_at,
+    orderCode: r.order_code,
+    customerName: r.customer_name,
+    orderStatus: r.order_status as OrderStatusCode,
+    serviceName: r.service_name,
+    orderCreatedAt: r.order_created_at,
+    photoCount: r.photo_count,
+    firstPhotoUrl: r.first_photo_id ? `/api/admin/clothing-photos/${r.first_photo_id}/file` : null,
+  }));
+}
+
+export function getCustomersDirectory(): CustomerDirectoryRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT
+         c.id, c.name, c.whatsapp, c.last_address, c.last_landmark, c.created_at,
+         COUNT(o.id) AS orders_count,
+         COALESCE(SUM(COALESCE(o.final_price, o.estimated_price)), 0) AS total_spent,
+         MAX(o.created_at) AS last_order_at
+       FROM customers c
+       LEFT JOIN orders o ON o.customer_id = c.id
+       GROUP BY c.id
+       ORDER BY COALESCE(MAX(o.created_at), c.created_at) DESC`
+    )
+    .all() as Array<{
+    id: string;
+    name: string;
+    whatsapp: string;
+    last_address: string;
+    last_landmark: string;
+    created_at: string;
+    orders_count: number;
+    total_spent: number;
+    last_order_at: string | null;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    whatsapp: r.whatsapp,
+    lastAddress: r.last_address,
+    lastLandmark: r.last_landmark,
+    ordersCount: r.orders_count,
+    totalSpent: r.total_spent,
+    lastOrderAt: r.last_order_at,
+    createdAt: r.created_at,
+  }));
+}
+
+export function saveClothingPhotoFile(dataUrl: string): { fileName: string; mimeType: string } | null {
+  const match = dataUrl.match(/^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,(.+)$/i);
+  if (!match) return null;
+
+  const mimeType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase();
+  const ext = mimeType.split('/')[1] === 'jpeg' ? 'jpg' : mimeType.split('/')[1];
+  const fileName = `${crypto.randomUUID()}.${ext}`;
+  const buffer = Buffer.from(match[2], 'base64');
+
+  if (buffer.length > 8 * 1024 * 1024) {
+    throw new Error('Ukuran foto maksimal 8 MB.');
+  }
+
+  fs.writeFileSync(path.join(clothingUploadsDir, fileName), buffer);
+  return { fileName, mimeType };
+}
+
+export function deleteClothingPhotoFile(fileName: string): void {
+  const safeName = path.basename(fileName);
+  const fullPath = path.join(clothingUploadsDir, safeName);
+  if (fs.existsSync(fullPath)) {
+    fs.unlinkSync(fullPath);
+  }
 }
 
 export function createNextOrderCode(now: Date): string {
