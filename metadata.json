@@ -1,0 +1,6 @@
+{
+  "name": "Laundry Huzavin",
+  "description": "Website resmi Laundry Huzavin Sawangan Depok — Layanan Cuci Kering & Cuci Setrika antar jemput gratis, kalkulator harga otomatis, lacak cucian real-time, chatbot AI, dan admin dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

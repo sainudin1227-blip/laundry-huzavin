@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    background-color: #f8fbff;
+    color: #0f172a;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes floatBubble {
+  0%, 100% {
+    transform: translateY(0px) scale(1);
+    opacity: 0.65;
+  }
+  50% {
+    transform: translateY(-14px) scale(1.06);
+    opacity: 0.9;
+  }
+}
+
+@keyframes gentleSpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-bubble-slow {
+  animation: floatBubble 5.5s ease-in-out infinite;
+}
+
+.animate-bubble-delayed {
+  animation: floatBubble 6.5s ease-in-out 1.4s infinite;
+}
+
+.animate-drum-spin {
+  animation: gentleSpin 12s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-bubble-slow,
+  .animate-bubble-delayed,
+  .animate-drum-spin {
+    animation: none !important;
+  }
+}
