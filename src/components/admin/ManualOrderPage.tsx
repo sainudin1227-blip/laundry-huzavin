@@ -28,7 +28,7 @@ import type {
   PhotoStage,
   ServiceItem,
 } from '../../lib/laundryRules';
-import { adminFetch } from '../../lib/adminAuthClient';
+import { createSupabaseManualOrder } from '../../lib/supabaseAdmin';
 import type { OrderRecordClient } from '../../types';
 
 interface ManualOrderPageProps {
@@ -163,44 +163,32 @@ export function ManualOrderPage({
 
     setSubmitting(true);
     try {
-      const res = await adminFetch('/api/admin/orders/manual', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          customerName: customerName.trim(),
-          customerPhone: customerPhone.trim(),
-          pickupAddress: pickupAddress.trim(),
-          serviceId: selectedService?.id ?? serviceId,
-          orderSource,
-          paymentStatus,
-          initialStatus,
-          pickupDate,
-          pickupTime,
-          totalWeightKg: parsedWeight,
-          notes: notes.trim(),
-          items: items.map((item) => ({
-            category: item.category,
-            quantity: Math.max(1, item.quantity),
-            weightKg: parseWeightInput(item.weightStr),
-            conditionNote: item.conditionNote,
-            specialNote: item.specialNote.trim(),
-          })),
-          photos: photos.map((p) => ({
-            dataUrl: p.dataUrl,
-            photoStage: p.photoStage,
-            caption: p.caption.trim(),
-          })),
-        }),
+      const created = await createSupabaseManualOrder({
+        customerName: customerName.trim(),
+        customerPhone: customerPhone.trim(),
+        pickupAddress: pickupAddress.trim(),
+        serviceId: selectedService?.id ?? serviceId,
+        orderSource,
+        paymentStatus,
+        initialStatus,
+        pickupDate,
+        pickupTime,
+        totalWeightKg: parsedWeight,
+        notes: notes.trim(),
+        items: items.map((item) => ({
+          category: item.category,
+          quantity: Math.max(1, item.quantity),
+          weightKg: parseWeightInput(item.weightStr),
+          conditionNote: item.conditionNote,
+          specialNote: item.specialNote.trim(),
+        })),
+        photos: photos.map((p) => ({
+          dataUrl: p.dataUrl,
+          photoStage: p.photoStage,
+          caption: p.caption.trim(),
+        })),
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        const firstErr = data.errors ? Object.values(data.errors)[0] : '';
-        setErrorMsg(String(firstErr || data.error || 'Gagal menyimpan pesanan.'));
-        return;
-      }
-
-      const created = data.order as OrderRecordClient;
       setSavedOrder(created);
       onOrderSaved(created);
 
@@ -211,8 +199,10 @@ export function ManualOrderPage({
       setManualWeightOverride(false);
       setItems([createBlankRow()]);
       setPhotos([]);
-    } catch {
-      setErrorMsg('Gagal terhubung ke server saat menyimpan pesanan.');
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Gagal menyimpan pesanan ke Supabase.'
+      );
     } finally {
       setSubmitting(false);
     }

@@ -40,10 +40,21 @@ import {
   type OrderStatusCode,
 } from '../lib/laundryRules';
 import {
-  adminFetch,
-  getAdminStreamUrl,
-  saveAdminSessionToken,
-} from '../lib/adminAuthClient';
+  changeSupabaseAdminPassword,
+  clearAdminSession,
+  deleteSupabaseGalleryItem,
+  deleteSupabaseOrder,
+  deleteSupabaseTestimonial,
+  fetchSupabaseAdminOverview,
+  getStoredAdminSession,
+  saveSupabaseGalleryItem,
+  saveSupabaseSettings,
+  saveSupabaseTestimonial,
+  updateSupabaseOrder,
+  updateSupabaseService,
+  verifyStoredAdminWithSupabase,
+} from '../lib/supabaseAdmin';
+import { getSupabaseClient } from '../lib/supabaseClient';
 import type {
   AdminOverviewData,
   AdminUser,
@@ -234,21 +245,7 @@ export function AdminPortal() {
   const loadOverview = useCallback(async (silent = false) => {
     if (!silent) setLoadingData(true);
     try {
-      const res = await adminFetch('/api/admin/overview');
-      if (res.status === 401) {
-        saveAdminSessionToken(null);
-        setAdminUser(null);
-        setOverview(null);
-        if (window.location.pathname !== '/admin/login') {
-          window.history.replaceState({}, '', '/admin/login');
-        }
-        return;
-      }
-      if (!res.ok) {
-        if (!silent) showToast('error', 'Gagal memuat data dashboard admin.');
-        return;
-      }
-      const data = (await res.json()) as AdminOverviewData;
+      const data = await fetchSupabaseAdminOverview();
       setOverview(data);
       setSettingsForm({
         businessName: data.settings.businessName,
@@ -257,8 +254,13 @@ export function AdminPortal() {
         address: data.settings.address,
         whatsappDisplay: data.settings.whatsappDisplay,
       });
-    } catch {
-      if (!silent) showToast('error', 'Gagal memuat data dashboard admin.');
+    } catch (err) {
+      if (!silent) {
+        showToast(
+          'error',
+          err instanceof Error ? err.message : 'Gagal memuat data dashboard admin dari Supabase.'
+        );
+      }
     } finally {
       if (!silent) setLoadingData(false);
     }
@@ -267,10 +269,18 @@ export function AdminPortal() {
   useEffect(() => {
     async function checkSession() {
       try {
-        const res = await adminFetch('/api/admin/me');
-        const data = await res.json();
-        if (data.authenticated && data.admin) {
-          setAdminUser(data.admin);
+        const localAdmin = getStoredAdminSession();
+        if (!localAdmin) {
+          setAdminUser(null);
+          if (window.location.pathname !== '/admin/login') {
+            window.history.replaceState({}, '', '/admin/login');
+          }
+          return;
+        }
+
+        const verifiedAdmin = await verifyStoredAdminWithSupabase();
+        if (verifiedAdmin) {
+          setAdminUser(verifiedAdmin);
           const clean = window.location.pathname.replace(/\/+$/, '');
           if (clean === '/admin' || clean === '/admin/login') {
             window.history.replaceState({ tab: 'dashboard' }, '', '/admin/dashboard');
@@ -280,15 +290,14 @@ export function AdminPortal() {
           }
           await loadOverview();
         } else {
-          saveAdminSessionToken(null);
+          clearAdminSession();
           setAdminUser(null);
           if (window.location.pathname !== '/admin/login') {
             window.history.replaceState({}, '', '/admin/login');
           }
         }
       } catch {
-        // Keep user on /admin/login if initial auth check fails offline
-        if (!adminUser && window.location.pathname !== '/admin/login') {
+        if (!getStoredAdminSession() && window.location.pathname !== '/admin/login') {
           window.history.replaceState({}, '', '/admin/login');
         }
       } finally {
@@ -298,22 +307,41 @@ export function AdminPortal() {
     checkSession();
   }, [loadOverview]);
 
-  // Live SSE incoming order alerts
+  // Live Supabase Realtime incoming order alerts
   useEffect(() => {
     if (!adminUser) return;
-    const es = new EventSource(getAdminStreamUrl(), { withCredentials: true });
-    es.addEventListener('order-created', (evt) => {
-      try {
-        const payload = JSON.parse((evt as MessageEvent).data);
-        setLiveIncomingAlert(
-          `Pesanan baru masuk: ${payload.orderCode} (${payload.customerName})`
-        );
-      } catch {
-        setLiveIncomingAlert('Ada pesanan baru masuk dari website!');
-      }
-      loadOverview(true);
-    });
-    return () => es.close();
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+
+    const channel = supabase
+      .channel('admin-orders-realtime')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'orders' },
+        (payload) => {
+          const newOrder = payload.new as { order_code?: string; customer_name?: string } | null;
+          if (newOrder?.order_code) {
+            setLiveIncomingAlert(
+              `Pesanan baru masuk: ${newOrder.order_code} (${newOrder.customer_name ?? 'Pelanggan'})`
+            );
+          } else {
+            setLiveIncomingAlert('Ada pesanan baru masuk!');
+          }
+          loadOverview(true);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'orders' },
+        () => {
+          loadOverview(true);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [adminUser, loadOverview]);
 
   async function handleLoginSuccess(admin: AdminUser) {
@@ -324,32 +352,26 @@ export function AdminPortal() {
   }
 
   async function handleLogout() {
-    try {
-      await adminFetch('/api/admin/logout', { method: 'POST' });
-    } finally {
-      saveAdminSessionToken(null);
-      setAdminUser(null);
-      setOverview(null);
-      setMobileDrawerOpen(false);
-      window.history.replaceState({}, '', '/admin/login');
-    }
+    clearAdminSession();
+    setAdminUser(null);
+    setOverview(null);
+    setMobileDrawerOpen(false);
+    window.history.replaceState({}, '', '/admin/login');
   }
 
   async function handleQuickAccept(order: OrderRecordClient) {
     const nextStatus: OrderStatusCode =
       order.status === 'ORDER_DITERIMA' ? 'MENUNGGU_PENJEMPUTAN' : order.status;
-    const res = await adminFetch(`/api/admin/orders/${order.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    try {
+      await updateSupabaseOrder(order.id, {
         adminDecision: 'diterima',
         status: nextStatus,
         statusNote: 'Pesanan diterima oleh admin Laundry Huzavin.',
-      }),
-    });
-    if (res.ok) {
+      });
       showToast('success', `Pesanan ${order.orderCode} diterima & dijadwalkan.`);
       await loadOverview(true);
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal menerima pesanan.');
     }
   }
 
@@ -357,35 +379,31 @@ export function AdminPortal() {
     e.preventDefault();
     if (!rejectModalOrder) return;
     const reason = rejectReasonInput.trim() || 'Di luar area layanan / dibatalkan';
-    const res = await adminFetch(`/api/admin/orders/${rejectModalOrder.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    try {
+      await updateSupabaseOrder(rejectModalOrder.id, {
         adminDecision: 'ditolak',
         rejectionReason: reason,
         statusNote: `Pesanan ditolak: ${reason}`,
-      }),
-    });
-    if (res.ok) {
+      });
       showToast('success', `Pesanan ${rejectModalOrder.orderCode} ditolak.`);
       setRejectModalOrder(null);
       setRejectReasonInput('');
       await loadOverview(true);
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal menolak pesanan.');
     }
   }
 
   async function handleMoveKanbanStage(order: OrderRecordClient, targetStatus: OrderStatusCode) {
-    const res = await adminFetch(`/api/admin/orders/${order.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    try {
+      await updateSupabaseOrder(order.id, {
         status: targetStatus,
         adminDecision: 'diterima',
-      }),
-    });
-    if (res.ok) {
+      });
       showToast('success', `Status ${order.orderCode} diperbarui.`);
       await loadOverview(true);
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal memindahkan status.');
     }
   }
 
@@ -395,52 +413,48 @@ export function AdminPortal() {
     if (currIdx === -1 || currIdx >= visibleStages.length - 1) return;
     const nextStage = visibleStages[currIdx + 1];
 
-    const res = await adminFetch(`/api/admin/orders/${order.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    try {
+      await updateSupabaseOrder(order.id, {
         status: nextStage.code,
         adminDecision: 'diterima',
-      }),
-    });
-    if (res.ok) {
+      });
       showToast('success', `${order.orderCode} lanjut ke: ${nextStage.label}`);
       await loadOverview(true);
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal memperbarui status.');
     }
   }
 
   async function handleTogglePaid(order: OrderRecordClient) {
     const nextPay = order.paymentStatus === 'lunas' ? 'belum_dibayar' : 'lunas';
-    const res = await adminFetch(`/api/admin/orders/${order.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    try {
+      await updateSupabaseOrder(order.id, {
         paymentStatus: nextPay,
         statusNote:
           nextPay === 'lunas'
             ? 'Pembayaran ditandai LUNAS oleh admin.'
             : 'Status pembayaran dikembalikan ke Belum Dibayar.',
-      }),
-    });
-    if (res.ok) {
+      });
       showToast(
         'success',
         `Pembayaran ${order.orderCode}: ${nextPay === 'lunas' ? 'Lunas' : 'Belum Dibayar'}`
       );
       await loadOverview(true);
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal mengubah status pembayaran.');
     }
   }
 
   async function handleDeleteOrder() {
     if (!confirmDeleteOrder) return;
-    const res = await adminFetch(`/api/admin/orders/${confirmDeleteOrder.id}`, { method: 'DELETE' });
-    if (!res.ok) {
-      showToast('error', 'Gagal menghapus pesanan.');
-      return;
+    try {
+      await deleteSupabaseOrder(confirmDeleteOrder.id);
+      showToast('success', `Pesanan ${confirmDeleteOrder.orderCode} dihapus.`);
+      setConfirmDeleteOrder(null);
+      await loadOverview();
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal menghapus pesanan.');
     }
-    showToast('success', `Pesanan ${confirmDeleteOrder.orderCode} dihapus.`);
-    setConfirmDeleteOrder(null);
-    await loadOverview();
   }
 
   async function handleUpdateService(
@@ -449,50 +463,47 @@ export function AdminPortal() {
     pricePerKg: number,
     description: string
   ) {
-    const res = await adminFetch(`/api/admin/services/${serviceId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, pricePerKg, description, estimatedDuration: '1–2 hari' }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast('error', data.error || 'Gagal memperbarui tarif layanan.');
-      return;
+    try {
+      await updateSupabaseService(serviceId, {
+        name,
+        pricePerKg,
+        description,
+        estimatedDuration: '1–2 hari',
+      });
+      showToast('success', `Tarif ${name} berhasil diperbarui.`);
+      await loadOverview();
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal memperbarui tarif layanan.');
     }
-    showToast('success', `Tarif ${name} berhasil diperbarui.`);
-    await loadOverview();
   }
 
   async function handleSaveGallery(e: React.FormEvent) {
     e.preventDefault();
-    const method = galleryForm.id ? 'PUT' : 'POST';
-    const url = galleryForm.id ? `/api/admin/gallery/${galleryForm.id}` : '/api/admin/gallery';
-    const res = await adminFetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(galleryForm),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast('error', data.error || 'Gagal menyimpan galeri.');
-      return;
+    try {
+      await saveSupabaseGalleryItem(galleryForm);
+      setGalleryForm({
+        id: null,
+        title: '',
+        category: 'Hasil setrika',
+        imageUrl: '',
+        caption: '',
+        isIllustration: false,
+      });
+      showToast('success', 'Galeri berhasil diperbarui.');
+      await loadOverview();
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal menyimpan galeri.');
     }
-    setGalleryForm({
-      id: null,
-      title: '',
-      category: 'Hasil setrika',
-      imageUrl: '',
-      caption: '',
-      isIllustration: false,
-    });
-    showToast('success', 'Galeri berhasil diperbarui.');
-    await loadOverview();
   }
 
   async function handleDeleteGallery(id: string) {
-    await adminFetch(`/api/admin/gallery/${id}`, { method: 'DELETE' });
-    showToast('success', 'Item galeri dihapus.');
-    await loadOverview();
+    try {
+      await deleteSupabaseGalleryItem(id);
+      showToast('success', 'Item galeri dihapus.');
+      await loadOverview();
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal menghapus galeri.');
+    }
   }
 
   function handleGalleryFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -517,69 +528,56 @@ export function AdminPortal() {
 
   async function handleSaveTestimonial(e: React.FormEvent) {
     e.preventDefault();
-    const method = testimonialForm.id ? 'PUT' : 'POST';
-    const url = testimonialForm.id
-      ? `/api/admin/testimonials/${testimonialForm.id}`
-      : '/api/admin/testimonials';
-    const res = await adminFetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(testimonialForm),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast('error', data.error || 'Gagal menyimpan testimoni.');
-      return;
+    try {
+      await saveSupabaseTestimonial(testimonialForm);
+      setTestimonialForm({ id: null, customerName: '', rating: 5, comment: '' });
+      showToast('success', 'Testimoni pelanggan berhasil disimpan.');
+      await loadOverview();
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal menyimpan testimoni.');
     }
-    setTestimonialForm({ id: null, customerName: '', rating: 5, comment: '' });
-    showToast('success', 'Testimoni pelanggan berhasil disimpan.');
-    await loadOverview();
   }
 
   async function handleDeleteTestimonial(id: string) {
-    await adminFetch(`/api/admin/testimonials/${id}`, { method: 'DELETE' });
-    showToast('success', 'Testimoni dihapus.');
-    await loadOverview();
+    try {
+      await deleteSupabaseTestimonial(id);
+      showToast('success', 'Testimoni dihapus.');
+      await loadOverview();
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal menghapus testimoni.');
+    }
   }
 
   async function handleSaveSettings(e: React.FormEvent) {
     e.preventDefault();
-    const res = await adminFetch('/api/admin/settings', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settingsForm),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast('error', data.error || 'Gagal memperbarui pengaturan.');
-      return;
+    try {
+      await saveSupabaseSettings(settingsForm);
+      showToast('success', 'Informasi kontak & bisnis berhasil diperbarui.');
+      await loadOverview();
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Gagal memperbarui pengaturan.');
     }
-    showToast('success', 'Informasi kontak & bisnis berhasil diperbarui.');
-    await loadOverview();
   }
 
   async function handleChangePassword(e: React.FormEvent) {
     e.preventDefault();
+    if (!adminUser) return;
     if (passwordForm.newPassword !== passwordForm.confirmPassword) {
       showToast('error', 'Konfirmasi password baru tidak cocok.');
       return;
     }
-    const res = await adminFetch('/api/admin/change-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        currentPassword: passwordForm.currentPassword,
-        newPassword: passwordForm.newPassword,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast('error', data.error || 'Gagal mengganti password.');
+    const result = await changeSupabaseAdminPassword(
+      adminUser.id,
+      passwordForm.currentPassword,
+      passwordForm.newPassword
+    );
+    if (!result.ok) {
+      showToast('error', result.error || 'Gagal mengganti password.');
       return;
     }
     setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
     setAdminUser((prev) => (prev ? { ...prev, mustChangePassword: false } : prev));
-    showToast('success', 'Password admin berhasil diperbarui.');
+    showToast('success', 'Password admin berhasil diperbarui di tabel admin_profiles.');
   }
 
   if (checkingAuth) {
@@ -1756,25 +1754,22 @@ export function AdminPortal() {
           {/* 11. PENGATURAN AKUN */}
           {activeTab === 'settings' && overview && (
             <div className="space-y-6">
-              {/* Honest Database Engine Banner */}
+              {/* Supabase Direct Database Banner */}
               <div className="rounded-2xl bg-white border border-sky-100 px-4 py-3.5 flex flex-wrap items-center justify-between gap-3 text-xs sm:text-sm">
                 <div className="flex items-center gap-2.5 text-slate-600">
                   <Database className="w-4 h-4 text-sky-600 shrink-0" />
                   <span>
-                    Penyimpanan Data Aktif:{' '}
-                    <strong className="text-[#0F2744]">SQLite Lokal Permanen</strong>
-                    {' · '}
-                    Supabase Eksternal:{' '}
+                    Koneksi Autentikasi &amp; Database:{' '}
                     <strong
                       className={
                         overview.databaseStatus.supabaseConfigured
                           ? 'text-emerald-700'
-                          : 'text-slate-700'
+                          : 'text-amber-700'
                       }
                     >
                       {overview.databaseStatus.supabaseConfigured
-                        ? 'Terkonfigurasi'
-                        : 'Belum dikonfigurasi (menggunakan SQLite aktif)'}
+                        ? 'Terhubung langsung ke Supabase (tabel admin_profiles)'
+                        : 'Konfigurasi VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY belum diatur'}
                     </strong>
                   </span>
                 </div>

@@ -32,7 +32,15 @@ import type {
   PaymentStatus,
   PhotoStage,
 } from '../../lib/laundryRules';
-import { adminFetch, getAdminProtectedAssetUrl } from '../../lib/adminAuthClient';
+import {
+  createSupabaseOrderItem,
+  deleteSupabaseClothingPhoto,
+  deleteSupabaseOrderItem,
+  fetchSupabaseOrderDetail,
+  updateSupabaseOrder,
+  updateSupabaseOrderItem,
+  uploadSupabaseClothingPhoto,
+} from '../../lib/supabaseAdmin';
 import type {
   ClothingPhotoClient,
   OrderHistoryItem,
@@ -86,13 +94,8 @@ export function OrderDetailModal({ orderId, onClose, onUpdated }: OrderDetailMod
     setLoading(true);
     setErrorMsg('');
     try {
-      const res = await adminFetch(`/api/admin/orders/${encodeURIComponent(id)}`);
-      const data = await res.json();
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Gagal memuat detail pesanan.');
-        return;
-      }
-      const o = data.order as OrderRecordClient;
+      const data = await fetchSupabaseOrderDetail(id);
+      const o = data.order;
       setOrder(o);
       setHistory(data.history ?? []);
       setItems(data.items ?? []);
@@ -105,8 +108,8 @@ export function OrderDetailModal({ orderId, onClose, onUpdated }: OrderDetailMod
       setFinalWeight(o.finalWeight !== null ? String(o.finalWeight) : String(o.estimatedWeight));
       setFinalPrice(o.finalPrice !== null ? String(o.finalPrice) : String(o.estimatedPrice));
       setStatusNote('');
-    } catch {
-      setErrorMsg('Gagal terhubung ke server.');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal memuat detail pesanan.');
     } finally {
       setLoading(false);
     }
@@ -135,24 +138,15 @@ export function OrderDetailModal({ orderId, onClose, onUpdated }: OrderDetailMod
     setErrorMsg('');
 
     try {
-      const res = await adminFetch(`/api/admin/orders/${order.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          status: overridePatch?.status ?? status,
-          paymentStatus: overridePatch?.paymentStatus ?? paymentStatus,
-          adminDecision: overridePatch?.adminDecision ?? adminDecision,
-          rejectionReason: overridePatch?.rejectionReason ?? rejectionReason,
-          finalWeight: finalWeight === '' ? null : finalWeight,
-          finalPrice: finalPrice === '' ? null : Number(finalPrice),
-          statusNote: overridePatch?.statusNote ?? statusNote,
-        }),
+      const data = await updateSupabaseOrder(order.id, {
+        status: overridePatch?.status ?? status,
+        paymentStatus: overridePatch?.paymentStatus ?? paymentStatus,
+        adminDecision: overridePatch?.adminDecision ?? adminDecision,
+        rejectionReason: overridePatch?.rejectionReason ?? rejectionReason,
+        finalWeight: finalWeight === '' ? null : finalWeight,
+        finalPrice: finalPrice === '' ? null : Number(finalPrice),
+        statusNote: overridePatch?.statusNote ?? statusNote,
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Gagal menyimpan perubahan pesanan.');
-        return;
-      }
       setOrder(data.order);
       setHistory(data.history ?? []);
       setStatus(data.order.status);
@@ -160,8 +154,8 @@ export function OrderDetailModal({ orderId, onClose, onUpdated }: OrderDetailMod
       setAdminDecision(data.order.adminDecision);
       setStatusNote('');
       onUpdated(`Pesanan ${data.order.orderCode} berhasil diperbarui.`);
-    } catch {
-      setErrorMsg('Terjadi kendala koneksi saat menyimpan pesanan.');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menyimpan perubahan pesanan.');
     } finally {
       setSavingOrder(false);
     }
@@ -179,42 +173,34 @@ export function OrderDetailModal({ orderId, onClose, onUpdated }: OrderDetailMod
       specialNote: itemForm.specialNote.trim(),
     };
 
-    const url = editingItemId
-      ? `/api/admin/order-items/${editingItemId}`
-      : `/api/admin/orders/${order.id}/items`;
-    const method = editingItemId ? 'PUT' : 'POST';
-
-    const res = await adminFetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setErrorMsg(data.error || 'Gagal menyimpan item pakaian.');
-      return;
+    try {
+      const nextItems = editingItemId
+        ? await updateSupabaseOrderItem(editingItemId, payload)
+        : await createSupabaseOrderItem(order.id, payload);
+      setItems(nextItems);
+      setShowAddItem(false);
+      setEditingItemId(null);
+      setItemForm({
+        category: CLOTHING_CATEGORIES[0],
+        quantity: 1,
+        weightStr: '0.5',
+        conditionNote: CLOTHING_CONDITIONS[0],
+        specialNote: '',
+      });
+      onUpdated('Daftar pakaian pesanan berhasil diperbarui.');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menyimpan item pakaian.');
     }
-
-    setItems(data.items ?? []);
-    setShowAddItem(false);
-    setEditingItemId(null);
-    setItemForm({
-      category: CLOTHING_CATEGORIES[0],
-      quantity: 1,
-      weightStr: '0.5',
-      conditionNote: CLOTHING_CONDITIONS[0],
-      specialNote: '',
-    });
-    onUpdated('Daftar pakaian pesanan berhasil diperbarui.');
   }
 
   async function handleDeleteItem(itemId: string) {
-    const res = await adminFetch(`/api/admin/order-items/${itemId}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (res.ok) {
-      setItems(data.items ?? []);
+    try {
+      const nextItems = await deleteSupabaseOrderItem(itemId);
+      setItems(nextItems);
       setConfirmDeleteItemId(null);
       onUpdated('Item pakaian dihapus.');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menghapus item pakaian.');
     }
   }
 
@@ -232,27 +218,18 @@ export function OrderDetailModal({ orderId, onClose, onUpdated }: OrderDetailMod
     reader.onload = async () => {
       try {
         if (typeof reader.result !== 'string') return;
-        const res = await adminFetch(`/api/admin/orders/${order.id}/photos`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dataUrl: reader.result,
-            photoStage,
-            caption:
-              photoCaption.trim() ||
-              (photoStage === 'sesudah' ? 'Hasil cucian bersih & rapi' : 'Kondisi pakaian masuk'),
-          }),
+        const nextPhotos = await uploadSupabaseClothingPhoto(order.id, {
+          dataUrl: reader.result,
+          photoStage,
+          caption:
+            photoCaption.trim() ||
+            (photoStage === 'sesudah' ? 'Hasil cucian bersih & rapi' : 'Kondisi pakaian masuk'),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          setErrorMsg(data.error || 'Gagal mengunggah foto.');
-          return;
-        }
-        setPhotos(data.photos ?? []);
+        setPhotos(nextPhotos);
         setPhotoCaption('');
         onUpdated('Foto dokumentasi pakaian tersimpan.');
-      } catch {
-        setErrorMsg('Gagal mengunggah foto pakaian.');
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : 'Gagal mengunggah foto pakaian.');
       } finally {
         setUploadingPhoto(false);
       }
@@ -262,12 +239,13 @@ export function OrderDetailModal({ orderId, onClose, onUpdated }: OrderDetailMod
   }
 
   async function handleDeletePhoto(photoId: string) {
-    const res = await adminFetch(`/api/admin/clothing-photos/${photoId}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (res.ok) {
-      setPhotos(data.photos ?? []);
+    try {
+      const nextPhotos = await deleteSupabaseClothingPhoto(photoId);
+      setPhotos(nextPhotos);
       setConfirmDeletePhotoId(null);
       onUpdated('Foto dokumentasi dihapus.');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menghapus foto.');
     }
   }
 
@@ -846,7 +824,7 @@ export function OrderDetailModal({ orderId, onClose, onUpdated }: OrderDetailMod
                       >
                         <div className="relative aspect-[4/3] bg-slate-100">
                           <img
-                            src={getAdminProtectedAssetUrl(photo.imageUrl)}
+                            src={photo.imageUrl}
                             alt={photo.caption || 'Foto pakaian pelanggan'}
                             className="w-full h-full object-cover"
                           />

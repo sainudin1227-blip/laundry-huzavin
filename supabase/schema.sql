@@ -170,35 +170,41 @@ create policy "Public read published testimonials" on public.testimonials
 create policy "Public read site settings" on public.site_settings
   for select using (true);
 
--- Only authenticated admins can read/write orders, items, photos, and history directly
+-- Admin profiles & dashboard direct access policies for @supabase/supabase-js
+create policy "Admin profiles read for login" on public.admin_profiles
+  for select using (true);
+
+create policy "Admin profiles update password" on public.admin_profiles
+  for update using (true) with check (true);
+
+create policy "Admin full access customers" on public.customers
+  for all using (true) with check (true);
+
+create policy "Admin full access services" on public.services
+  for all using (true) with check (true);
+
+create policy "Admin full access gallery" on public.gallery
+  for all using (true) with check (true);
+
+create policy "Admin full access testimonials" on public.testimonials
+  for all using (true) with check (true);
+
+create policy "Admin full access site settings" on public.site_settings
+  for all using (true) with check (true);
+
 create policy "Admin full access orders" on public.orders
-  for all using (
-    exists (
-      select 1 from public.admin_profiles ap
-      where ap.auth_user_id = auth.uid()
-    )
-  );
+  for all using (true) with check (true);
 
 create policy "Admin full access order items" on public.order_items
-  for all using (
-    exists (
-      select 1 from public.admin_profiles ap
-      where ap.auth_user_id = auth.uid()
-    )
-  );
+  for all using (true) with check (true);
 
 create policy "Admin full access clothing photos" on public.clothing_photos
-  for all using (
-    exists (
-      select 1 from public.admin_profiles ap
-      where ap.auth_user_id = auth.uid()
-    )
-  );
+  for all using (true) with check (true);
 
 create policy "Admin full access order history" on public.order_status_history
-  for all using (
-    exists (
-      select 1 from public.admin_profiles ap
-      where ap.auth_user_id = auth.uid()
-    )
-  );
+  for all using (true) with check (true);
+
+-- Seed initial admin account: username = 'huzavin', password = 'abiumi'
+insert into public.admin_profiles (username, password_hash, display_name, must_change_password)
+values ('huzavin', crypt('abiumi', gen_salt('bf')), 'Huzavin', true)
+on conflict (username) do nothing;

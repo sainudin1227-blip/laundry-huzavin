@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ArrowLeft, Eye, EyeOff, Lock } from 'lucide-react';
-import { adminFetch, saveAdminSessionToken } from '../../lib/adminAuthClient';
+import { loginAdminWithSupabase } from '../../lib/supabaseAdmin';
+import { isSupabaseConfigured } from '../../lib/supabaseClient';
 import type { AdminUser } from '../../types';
 
 interface AdminLoginPageProps {
@@ -20,37 +21,20 @@ export function AdminLoginPage({ onSuccess }: AdminLoginPageProps) {
     setLoggingIn(true);
 
     try {
-      const res = await fetch('/api/admin/login', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        saveAdminSessionToken(null);
-        setLoginError(data.error || 'Username atau password admin tidak valid.');
-        return;
-      }
-
-      if (typeof data.sessionToken === 'string') {
-        saveAdminSessionToken(data.sessionToken);
-      }
-
-      // Verify active session from backend before entering /admin/dashboard
-      const meRes = await adminFetch('/api/admin/me');
-      const meData = await meRes.json();
-      if (!meRes.ok || !meData.authenticated || !meData.admin) {
-        saveAdminSessionToken(null);
-        setLoginError('Sesi admin gagal diverifikasi server. Silakan coba login ulang.');
+      const result = await loginAdminWithSupabase(username, password);
+      if (!result.ok || !result.admin) {
+        setLoginError(result.error || 'Username atau password salah');
         return;
       }
 
       setPassword('');
-      onSuccess(meData.admin as AdminUser);
-    } catch {
-      saveAdminSessionToken(null);
-      setLoginError('Gagal terhubung ke server autentikasi. Coba beberapa saat lagi.');
+      onSuccess(result.admin);
+    } catch (err) {
+      setLoginError(
+        err instanceof Error
+          ? err.message
+          : 'Gagal terhubung ke Supabase. Periksa konfigurasi VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY.'
+      );
     } finally {
       setLoggingIn(false);
     }
@@ -101,6 +85,19 @@ export function AdminLoginPage({ onSuccess }: AdminLoginPageProps) {
             </p>
           </div>
         </div>
+
+        {!isSupabaseConfigured && (
+          <div
+            role="status"
+            className="mb-4 p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900 leading-relaxed"
+          >
+            <strong>Konfigurasi Supabase Diperlukan:</strong> Atur variabel{' '}
+            <code className="font-mono font-semibold">VITE_SUPABASE_URL</code> dan{' '}
+            <code className="font-mono font-semibold">VITE_SUPABASE_ANON_KEY</code> pada Secrets /{' '}
+            <code className="font-mono font-semibold">.env</code> untuk menghubungkan tabel{' '}
+            <code className="font-mono font-semibold">admin_profiles</code>.
+          </div>
+        )}
 
         {loginError && (
           <div

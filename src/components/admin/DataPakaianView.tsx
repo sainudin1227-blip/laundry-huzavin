@@ -8,7 +8,12 @@ import {
   ORDER_STAGES,
   parseWeightInput,
 } from '../../lib/laundryRules';
-import { adminFetch, getAdminProtectedAssetUrl } from '../../lib/adminAuthClient';
+import {
+  createSupabaseOrderItem,
+  deleteSupabaseOrderItem,
+  updateSupabaseOrderItem,
+  uploadSupabaseClothingPhoto,
+} from '../../lib/supabaseAdmin';
 import type { OrderItemClient, OrderRecordClient } from '../../types';
 
 interface DataPakaianViewProps {
@@ -115,37 +120,25 @@ export function DataPakaianView({
 
     setSaving(true);
     try {
-      const url = editingItem
-        ? `/api/admin/order-items/${editingItem.id}`
-        : `/api/admin/orders/${targetOrderId}/items`;
-      const method = editingItem ? 'PUT' : 'POST';
+      const payload = {
+        category,
+        quantity: Math.max(1, quantity),
+        weightKg: parseWeightInput(weightStr),
+        conditionNote,
+        specialNote: specialNote.trim(),
+      };
 
-      const res = await adminFetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          category,
-          quantity: Math.max(1, quantity),
-          weightKg: parseWeightInput(weightStr),
-          conditionNote,
-          specialNote: specialNote.trim(),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setFormError(data.error || 'Gagal menyimpan data pakaian.');
-        return;
+      if (editingItem) {
+        await updateSupabaseOrderItem(editingItem.id, payload);
+      } else {
+        await createSupabaseOrderItem(targetOrderId, payload);
       }
 
       if (photoDataUrl) {
-        await adminFetch(`/api/admin/orders/${targetOrderId}/photos`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dataUrl: photoDataUrl,
-            photoStage: 'sebelum',
-            caption: `${category} (${conditionNote})`,
-          }),
+        await uploadSupabaseClothingPhoto(targetOrderId, {
+          dataUrl: photoDataUrl,
+          photoStage: 'sebelum',
+          caption: `${category} (${conditionNote})`,
         });
       }
 
@@ -153,18 +146,20 @@ export function DataPakaianView({
       await onChanged(
         editingItem ? 'Data pakaian berhasil diperbarui.' : 'Data pakaian berhasil ditambahkan.'
       );
-    } catch {
-      setFormError('Gagal terhubung ke server.');
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Gagal menyimpan data pakaian.');
     } finally {
       setSaving(false);
     }
   }
 
   async function handleDeleteItem(itemId: string) {
-    const res = await adminFetch(`/api/admin/order-items/${itemId}`, { method: 'DELETE' });
-    if (res.ok) {
+    try {
+      await deleteSupabaseOrderItem(itemId);
       setConfirmDeleteId(null);
       await onChanged('Data pakaian berhasil dihapus.');
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Gagal menghapus data pakaian.');
     }
   }
 
@@ -282,7 +277,7 @@ export function DataPakaianView({
                     <div className="flex items-center gap-2.5 min-w-0">
                       {item.firstPhotoUrl ? (
                         <img
-                          src={getAdminProtectedAssetUrl(item.firstPhotoUrl)}
+                          src={item.firstPhotoUrl}
                           alt={item.category}
                           className="w-12 h-12 rounded-xl object-cover border border-sky-200 shrink-0"
                         />
@@ -372,7 +367,7 @@ export function DataPakaianView({
                         <div className="flex items-center gap-3">
                           {item.firstPhotoUrl ? (
                             <img
-                              src={getAdminProtectedAssetUrl(item.firstPhotoUrl)}
+                              src={item.firstPhotoUrl}
                               alt={item.category}
                               className="w-11 h-11 rounded-xl object-cover border border-sky-200 shrink-0"
                             />
