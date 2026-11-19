@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { ArrowLeft, Eye, EyeOff, Lock } from 'lucide-react';
 import { loginAdminWithSupabase } from '../../lib/supabaseAdmin';
-import { isSupabaseConfigured } from '../../lib/supabaseClient';
 import type { AdminUser } from '../../types';
 
 interface AdminLoginPageProps {
@@ -29,12 +28,8 @@ export function AdminLoginPage({ onSuccess }: AdminLoginPageProps) {
 
       setPassword('');
       onSuccess(result.admin);
-    } catch (err) {
-      setLoginError(
-        err instanceof Error
-          ? err.message
-          : 'Gagal terhubung ke Supabase. Periksa konfigurasi VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY.'
-      );
+    } catch {
+      setLoginError('Konfigurasi Supabase belum lengkap di Cloudflare');
     } finally {
       setLoggingIn(false);
     }
@@ -85,19 +80,6 @@ export function AdminLoginPage({ onSuccess }: AdminLoginPageProps) {
             </p>
           </div>
         </div>
-
-        {!isSupabaseConfigured && (
-          <div
-            role="status"
-            className="mb-4 p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900 leading-relaxed"
-          >
-            <strong>Konfigurasi Supabase Diperlukan:</strong> Atur variabel{' '}
-            <code className="font-mono font-semibold">VITE_SUPABASE_URL</code> dan{' '}
-            <code className="font-mono font-semibold">VITE_SUPABASE_ANON_KEY</code> pada Secrets /{' '}
-            <code className="font-mono font-semibold">.env</code> untuk menghubungkan tabel{' '}
-            <code className="font-mono font-semibold">admin_profiles</code>.
-          </div>
-        )}
 
         {loginError && (
           <div

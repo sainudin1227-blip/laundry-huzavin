@@ -18,7 +18,7 @@ interface FakeAdminRow {
   must_change_password: boolean;
 }
 
-function makeFakeSupabaseClient(initialRows: FakeAdminRow[]): SupabaseClient {
+function makeFakeSupabaseClient(initialRows: FakeAdminRow[], simulateError?: string): SupabaseClient {
   const rows = initialRows.map((r) => ({ ...r }));
 
   return {
@@ -37,6 +37,9 @@ function makeFakeSupabaseClient(initialRows: FakeAdminRow[]): SupabaseClient {
               return query;
             },
             async maybeSingle() {
+              if (simulateError) {
+                return { data: null, error: { message: simulateError } };
+              }
               const found = rows.find((row) =>
                 filters.every((f) => {
                   const candidate = String(row[f.col] ?? '');
@@ -66,12 +69,18 @@ function makeFakeSupabaseClient(initialRows: FakeAdminRow[]): SupabaseClient {
   } as unknown as SupabaseClient;
 }
 
-test('loginAdminWithSupabase returns clear error when Supabase client is not configured', async () => {
+test('loginAdminWithSupabase returns Cloudflare config error when Supabase client is not configured or fetch fails', async () => {
   clearAdminSession();
   const res = await loginAdminWithSupabase('huzavin', 'abiumi', null);
   assert.equal(res.ok, false);
-  assert.match(res.error ?? '', /VITE_SUPABASE_URL/);
+  assert.equal(res.error, 'Konfigurasi Supabase belum lengkap di Cloudflare');
   assert.equal(getStoredAdminSession(), null);
+
+  const fetchErrClient = makeFakeSupabaseClient([], 'TypeError: Failed to fetch');
+  const fetchRes = await loginAdminWithSupabase('huzavin', 'abiumi', fetchErrClient);
+  assert.equal(fetchRes.ok, false);
+  assert.equal(fetchRes.error, 'Konfigurasi Supabase belum lengkap di Cloudflare');
+  assert.doesNotMatch(fetchRes.error ?? '', /Failed to fetch|Gagal memeriksa tabel/);
 });
 
 test('loginAdminWithSupabase authenticates against admin_profiles bcrypt hash and stores session', async () => {

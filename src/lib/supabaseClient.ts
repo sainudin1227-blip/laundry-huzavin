@@ -1,10 +1,31 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-const env = (import.meta as { env?: Record<string, string | undefined> }).env;
-const supabaseUrl = env?.VITE_SUPABASE_URL?.trim() ?? '';
-const supabaseAnonKey = env?.VITE_SUPABASE_ANON_KEY?.trim() ?? '';
+const rawUrl =
+  typeof import.meta !== 'undefined' && import.meta.env
+    ? import.meta.env.VITE_SUPABASE_URL
+    : '';
 
-export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+const rawAnonKey =
+  typeof import.meta !== 'undefined' && import.meta.env
+    ? import.meta.env.VITE_SUPABASE_ANON_K || import.meta.env.VITE_SUPABASE_ANON_KEY
+    : '';
+
+const supabaseUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+const supabaseAnonKey = typeof rawAnonKey === 'string' ? rawAnonKey.trim() : '';
+
+function isValidSupabaseUrl(url: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+export const isSupabaseConfigured = Boolean(
+  isValidSupabaseUrl(supabaseUrl) && supabaseAnonKey.length > 0
+);
 
 let cachedClient: SupabaseClient | null = null;
 

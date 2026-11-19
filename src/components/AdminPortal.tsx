@@ -52,7 +52,6 @@ import {
   saveSupabaseTestimonial,
   updateSupabaseOrder,
   updateSupabaseService,
-  verifyStoredAdminWithSupabase,
 } from '../lib/supabaseAdmin';
 import { getSupabaseClient } from '../lib/supabaseClient';
 import type {
@@ -124,8 +123,7 @@ const SIDEBAR_MENU: Array<{
 ];
 
 export function AdminPortal() {
-  const [checkingAuth, setCheckingAuth] = useState(true);
-  const [adminUser, setAdminUser] = useState<AdminUser | null>(null);
+  const [adminUser, setAdminUser] = useState<AdminUser | null>(() => getStoredAdminSession());
 
   // URL-synced route state
   const [activeTab, setActiveTab] = useState<AdminTab>(() =>
@@ -267,44 +265,24 @@ export function AdminPortal() {
   }, []);
 
   useEffect(() => {
-    async function checkSession() {
-      try {
-        const localAdmin = getStoredAdminSession();
-        if (!localAdmin) {
-          setAdminUser(null);
-          if (window.location.pathname !== '/admin/login') {
-            window.history.replaceState({}, '', '/admin/login');
-          }
-          return;
-        }
-
-        const verifiedAdmin = await verifyStoredAdminWithSupabase();
-        if (verifiedAdmin) {
-          setAdminUser(verifiedAdmin);
-          const clean = window.location.pathname.replace(/\/+$/, '');
-          if (clean === '/admin' || clean === '/admin/login') {
-            window.history.replaceState({ tab: 'dashboard' }, '', '/admin/dashboard');
-            setActiveTab('dashboard');
-          } else {
-            setActiveTab(parseTabFromPathname(clean));
-          }
-          await loadOverview();
-        } else {
-          clearAdminSession();
-          setAdminUser(null);
-          if (window.location.pathname !== '/admin/login') {
-            window.history.replaceState({}, '', '/admin/login');
-          }
-        }
-      } catch {
-        if (!getStoredAdminSession() && window.location.pathname !== '/admin/login') {
-          window.history.replaceState({}, '', '/admin/login');
-        }
-      } finally {
-        setCheckingAuth(false);
+    const localAdmin = getStoredAdminSession();
+    if (!localAdmin) {
+      setAdminUser(null);
+      if (window.location.pathname !== '/admin/login') {
+        window.history.replaceState({}, '', '/admin/login');
       }
+      return;
     }
-    checkSession();
+
+    setAdminUser(localAdmin);
+    const clean = window.location.pathname.replace(/\/+$/, '');
+    if (clean === '/admin' || clean === '/admin/login') {
+      window.history.replaceState({ tab: 'dashboard' }, '', '/admin/dashboard');
+      setActiveTab('dashboard');
+    } else {
+      setActiveTab(parseTabFromPathname(clean));
+    }
+    void loadOverview();
   }, [loadOverview]);
 
   // Live Supabase Realtime incoming order alerts
@@ -578,14 +556,6 @@ export function AdminPortal() {
     setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
     setAdminUser((prev) => (prev ? { ...prev, mustChangePassword: false } : prev));
     showToast('success', 'Password admin berhasil diperbarui di tabel admin_profiles.');
-  }
-
-  if (checkingAuth) {
-    return (
-      <div className="min-h-screen bg-[#F4F9FF] flex items-center justify-center p-6">
-        <div className="text-sm font-semibold text-sky-700">Memeriksa sesi admin...</div>
-      </div>
-    );
   }
 
   // Unauthenticated route -> Dedicated /admin/login page
@@ -1769,7 +1739,7 @@ export function AdminPortal() {
                     >
                       {overview.databaseStatus.supabaseConfigured
                         ? 'Terhubung langsung ke Supabase (tabel admin_profiles)'
-                        : 'Konfigurasi VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY belum diatur'}
+                        : 'Konfigurasi Supabase belum lengkap di Cloudflare'}
                     </strong>
                   </span>
                 </div>

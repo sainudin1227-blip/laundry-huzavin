@@ -105,8 +105,7 @@ export async function loginAdminWithSupabase(
   if (!client) {
     return {
       ok: false,
-      error:
-        'Konfigurasi Supabase (VITE_SUPABASE_URL dan VITE_SUPABASE_ANON_KEY) belum diatur pada environment.',
+      error: 'Konfigurasi Supabase belum lengkap di Cloudflare',
     };
   }
 
@@ -115,82 +114,64 @@ export async function loginAdminWithSupabase(
     return { ok: false, error: 'Username dan password wajib diisi.' };
   }
 
-  const { data: row, error } = await client
-    .from('admin_profiles')
-    .select('id, username, password_hash, display_name, must_change_password')
-    .ilike('username', cleanUsername)
-    .maybeSingle();
+  try {
+    const { data: row, error } = await client
+      .from('admin_profiles')
+      .select('id, username, password_hash, display_name, must_change_password')
+      .eq('username', cleanUsername)
+      .maybeSingle();
 
-  if (error) {
+    if (error) {
+      const msg = error.message.toLowerCase();
+      if (
+        msg.includes('fetch') ||
+        msg.includes('network') ||
+        msg.includes('apikey') ||
+        msg.includes('api key') ||
+        msg.includes('jwt')
+      ) {
+        return {
+          ok: false,
+          error: 'Konfigurasi Supabase belum lengkap di Cloudflare',
+        };
+      }
+      return { ok: false, error: 'Username atau password salah' };
+    }
+
+    if (!row || typeof row.password_hash !== 'string') {
+      return { ok: false, error: 'Username atau password salah' };
+    }
+
+    const valid = bcrypt.compareSync(password, row.password_hash);
+    if (!valid) {
+      return { ok: false, error: 'Username atau password salah' };
+    }
+
+    const admin: AdminUser = {
+      id: String(row.id),
+      username: String(row.username),
+      displayName: String(row.display_name || 'Admin Huzavin'),
+      mustChangePassword: Boolean(row.must_change_password),
+    };
+
+    persistAdminSession({
+      admin,
+      exp: Date.now() + SESSION_TTL_MS,
+    });
+
+    return { ok: true, admin };
+  } catch {
     return {
       ok: false,
-      error: `Gagal memeriksa tabel admin_profiles di Supabase: ${error.message}`,
+      error: 'Konfigurasi Supabase belum lengkap di Cloudflare',
     };
   }
-
-  if (!row || typeof row.password_hash !== 'string') {
-    return { ok: false, error: 'Username atau password salah' };
-  }
-
-  const valid = bcrypt.compareSync(password, row.password_hash);
-  if (!valid) {
-    return { ok: false, error: 'Username atau password salah' };
-  }
-
-  const admin: AdminUser = {
-    id: String(row.id),
-    username: String(row.username),
-    displayName: String(row.display_name || 'Admin Huzavin'),
-    mustChangePassword: Boolean(row.must_change_password),
-  };
-
-  persistAdminSession({
-    admin,
-    exp: Date.now() + SESSION_TTL_MS,
-  });
-
-  return { ok: true, admin };
 }
 
 export async function verifyStoredAdminWithSupabase(
-  clientOverride?: SupabaseClient | null
+  _clientOverride?: SupabaseClient | null
 ): Promise<AdminUser | null> {
-  const localAdmin = getStoredAdminSession();
-  if (!localAdmin) return null;
-
-  const client = clientOverride !== undefined ? clientOverride : getSupabaseClient();
-  if (!client) {
-    clearAdminSession();
-    return null;
-  }
-
-  const { data: row, error } = await client
-    .from('admin_profiles')
-    .select('id, username, display_name, must_change_password')
-    .eq('id', localAdmin.id)
-    .maybeSingle();
-
-  if (error) {
-    // Keep session on transient network errors; reject only if profile is confirmed deleted
-    return localAdmin;
-  }
-
-  if (!row) {
-    clearAdminSession();
-    return null;
-  }
-
-  const refreshed: AdminUser = {
-    id: String(row.id),
-    username: String(row.username),
-    displayName: String(row.display_name || 'Admin Huzavin'),
-    mustChangePassword: Boolean(row.must_change_password),
-  };
-  persistAdminSession({
-    admin: refreshed,
-    exp: memorySession?.exp ?? Date.now() + SESSION_TTL_MS,
-  });
-  return refreshed;
+  return getStoredAdminSession();
 }
 
 export async function changeSupabaseAdminPassword(
@@ -310,7 +291,7 @@ function mapOrderRow(
 function requireSupabaseClient(): SupabaseClient {
   const client = getSupabaseClient();
   if (!client) {
-    throw new Error('Konfigurasi Supabase (VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY) belum diatur.');
+    throw new Error('Konfigurasi Supabase belum lengkap di Cloudflare');
   }
   return client;
 }
